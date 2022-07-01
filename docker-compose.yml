@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  db:
+    container_name: context_mod_postgres
+    image: postgres:13
+    volumes:
+      - context_mod_postgres_vol:/var/lib/postgresql/data
+      - ./import:/mnt/import
+    environment:
+      - POSTGRES_DB=${DB_NAME}
+      - POSTGRES_USER=${DB_USERNAME}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+    ports:
+      - "5432:5432"
+
+  bot:
+    container_name: context_mod_node
+    build:
+      context: .
+      dockerfile: dev.Dockerfile
+    volumes:
+      - ./:/config
+    ports:
+      - "8085:8085"
+    depends_on:
+      - db
+    environment:
+      DB_DRIVER: ${DB_DRIVER}
+      DB_NAME: ${DB_NAME}
+      DB_USERNAME: ${DB_USERNAME}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_HOST: ${DB_HOST}
+      DB_PORT: ${DB_PORT}
+
+volumes:
+  context_mod_postgres_vol:
+    external: true
