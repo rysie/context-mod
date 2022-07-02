@@ -1,4 +1,4 @@
-version: "3.9"
+version: "2.0"
 
 services:
   db:
@@ -6,16 +6,16 @@ services:
     image: postgres:13
     volumes:
       - context_mod_postgres_vol:/var/lib/postgresql/data
-      - ./import:/mnt/import
     environment:
       - POSTGRES_DB=${DB_NAME}
       - POSTGRES_USER=${DB_USERNAME}
       - POSTGRES_PASSWORD=${DB_PASSWORD}
     ports:
-      - "5432:5432"
+      - 5432:5432
 
   bot:
     container_name: context_mod_node
+    image: ${DOCKER_REGISTRY_IMAGE}
     build:
       context: .
       dockerfile: dev.Dockerfile

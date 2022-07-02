@@ -109,7 +109,7 @@ FROM base as app
 
 COPY --from=build --chown=abc:abc /app /app
 
-RUN npm install \
+RUN npm install --production \
     && npm cache clean --force \
     && chown abc:abc node_modules \
     && rm -rf node_modules/ts-node \
