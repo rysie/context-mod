@@ -4,6 +4,7 @@ services:
   db:
     container_name: context_mod_postgres
     image: postgres:13
+    restart: always
     volumes:
       - context_mod_postgres_vol:/var/lib/postgresql/data
     environment:
@@ -16,6 +17,7 @@ services:
   bot:
     container_name: context_mod_node
     image: ${DOCKER_REGISTRY_IMAGE}
+    restart: always
     build:
       context: .
       dockerfile: prod.Dockerfile
