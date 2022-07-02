@@ -1,59 +1,38 @@
-version: "3.8"
+version: "2.0"
 
 services:
-  411_db:
-    container_name: 411_postgres
-    image: postgres:13.0-alpine
+  db:
+    container_name: context_mod_postgres
+    image: postgres:13
     volumes:
-      - 411_postgres_data:/var/lib/postgresql/data
-      - ./import:/mnt/import
-    env_file:
-      - ./.env.prod
-    networks:
-      - "backend"
+      - context_mod_postgres_vol:/var/lib/postgresql/data
     environment:
       - POSTGRES_DB=${DB_NAME}
       - POSTGRES_USER=${DB_USERNAME}
       - POSTGRES_PASSWORD=${DB_PASSWORD}
     ports:
-      - ${DB_PORT}:5432
+      - 5432:5432
 
-  411_api:
-    container_name: 411_django
-    image: registry.gitlab.com/rysie/reddit-411-nsfw:prod
+  bot:
+    container_name: context_mod_node
+    image: ${DOCKER_REGISTRY_IMAGE}
     build:
       context: .
-      dockerfile: Dockerfile.prod
-    command: gunicorn brain.wsgi:application --bind 0.0.0.0:8000
-    env_file:
-      - ./.env.prod
+      dockerfile: prod.Dockerfile
     volumes:
-      - .:/usr/src/app/
-    networks:
-      - "backend"
+      - ./:/config
     ports:
-      - 8000:8000
+      - "8085:8085"
     depends_on:
-      - 411_db
+      - db
     environment:
-      DEBUG: ${DEBUG}
-      SECRET_KEY: ${SECRET_KEY}
-      # DB
+      DB_DRIVER: ${DB_DRIVER}
       DB_NAME: ${DB_NAME}
       DB_USERNAME: ${DB_USERNAME}
       DB_PASSWORD: ${DB_PASSWORD}
       DB_HOST: ${DB_HOST}
       DB_PORT: ${DB_PORT}
-      # PRAW
-      PRAW_CLIENT_ID: ${PRAW_CLIENT_ID}
-      PRAW_CLIENT_SECRET: ${PRAW_CLIENT_SECRET}
-      PRAW_PASSWORD: ${PRAW_PASSWORD}
-      PRAW_USERNAME: ${PRAW_USERNAME}
-      PRAW_USER_AGENT: ${PRAW_USER_AGENT}
-
-networks:
-  backend:
-    driver: "bridge"
 
 volumes:
-  411_postgres_data:
+  context_mod_postgres_vol:
+    external: true
