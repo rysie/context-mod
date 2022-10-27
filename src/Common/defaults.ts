@@ -2,6 +2,9 @@ import {HistoricalStatsDisplay} from "./interfaces";
 import path from "path";
 import {FilterCriteriaDefaults} from "./Infrastructure/Filters/FilterShapes";
 
+export const dayjsDTFormat = 'YYYY-MM-DD HH:mm:ssZ';
+export const dayjsTimeFormat = 'HH:mm:ss z';
+
 export const cacheOptDefaults = {ttl: 60, max: 500, checkPeriod: 600};
 export const cacheTTLDefaults = {
     authorTTL: 60,
@@ -42,4 +45,4 @@ export const filterCriteriaDefault: FilterCriteriaDefaults = {
 export const defaultDataDir = path.resolve(__dirname, '../..');
 export const defaultConfigFilenames = ['config.json', 'config.yaml'];
 
-export const VERSION = '0.11.4';
+export const VERSION = '0.13.2';

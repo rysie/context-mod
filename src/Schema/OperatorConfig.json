@@ -49,6 +49,23 @@
                         ]
                     ]
                 },
+                "flairBackgroundColor": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "The (user) flair background color (or list of) from the subreddit to match against\n\n* If `true` then passes if ANY css background color is assigned\n* If `false` then passes if NO css background is assigned\n* If string or list of strings then color is matched, case-insensitive, without #. String may also be a regular expression enclosed in forward slashes."
+                },
                 "flairCssClass": {
                     "anyOf": [
                         {
@@ -64,7 +81,7 @@
                             ]
                         }
                     ],
-                    "description": "A (user) flair css class (or list of) from the subreddit to match against\n\n* If `true` then passes if ANY css is assigned\n* If `false` then passes if NO css is assigned",
+                    "description": "A (user) flair css class (or list of) from the subreddit to match against\n\n* If `true` then passes if ANY css is assigned\n* If `false` then passes if NO css is assigned\n* If string or list of strings then text is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes.",
                     "examples": [
                         "red"
                     ]
@@ -84,7 +101,7 @@
                             ]
                         }
                     ],
-                    "description": "A (user) flair template id (or list of) from the subreddit to match against\n\n* If `true` then passes if ANY template is assigned\n* If `false` then passed if NO template is assigned"
+                    "description": "A (user) flair template id (or list of) from the subreddit to match against\n\n* If `true` then passes if ANY template is assigned\n* If `false` then passed if NO template is assigned\n* If string or list of strings then text is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes."
                 },
                 "flairText": {
                     "anyOf": [
@@ -101,7 +118,7 @@
                             ]
                         }
                     ],
-                    "description": "A (user) flair text value (or list of) from the subreddit to match against\n\n* If `true` then passes if ANY text is assigned\n* If `false` then passes if NO text is assigned",
+                    "description": "A (user) flair text value (or list of) from the subreddit to match against\n\n* If `true` then passes if ANY text is assigned\n* If `false` then passes if NO text is assigned\n* If string or list of strings then text is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes.",
                     "examples": [
                         "Approved"
                     ]
@@ -133,10 +150,11 @@
                     "type": "array"
                 },
                 "name": {
-                    "description": "A list of reddit usernames (case-insensitive) to match against. Do not include the \"u/\" prefix\n\n EX to match against /u/FoxxMD and /u/AnotherUser use [\"FoxxMD\",\"AnotherUser\"]",
+                    "description": "A list of reddit usernames (case-insensitive) or regular expressions to match against. Do not include the \"u/\" prefix\n\n\n EX to match against /u/FoxxMD and /u/AnotherUser use [\"FoxxMD\",\"AnotherUser\"]",
                     "examples": [
                         "FoxxMD",
-                        "AnotherUser"
+                        "AnotherUser",
+                        "/.*Foxx./*i"
                     ],
                     "items": {
                         "type": "string"
@@ -186,6 +204,17 @@
         },
         "BotCredentialsJsonConfig": {
             "properties": {
+                "mhs": {
+                    "properties": {
+                        "apiKey": {
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "apiKey"
+                    ],
+                    "type": "object"
+                },
                 "reddit": {
                     "$ref": "#/definitions/RedditCredentials"
                 },
@@ -462,6 +491,10 @@
                     ],
                     "type": "number"
                 },
+                "prefix": {
+                    "description": "A prefix to add to all keys",
+                    "type": "string"
+                },
                 "store": {
                     "$ref": "#/definitions/CacheProvider"
                 },
@@ -521,6 +554,88 @@
                         }
                     ],
                     "description": "* true/false => test whether Activity is approved or not\n* string or list of strings => test which moderator approved this Activity"
+                },
+                "authorFlairBackgroundColor": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "* If `true` then passes if ANY color\n* If `false` then passes if NO color\n* If string or list of strings then color is matched, case-insensitive, without #. String may also be a regular expression enclosed in forward slashes."
+                },
+                "authorFlairCssClass": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "* If `true` then passes if ANY class\n* If `false` then passes if NO class\n* If string or list of strings then class is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes."
+                },
+                "authorFlairTemplateId": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "* If `true` then passes if ANY flair\n* If `false` then passes if NO flair\n* If string or list of strings then template id is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes."
+                },
+                "authorFlairText": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "* If `true` then passes if ANY flair\n* If `false` then passes if NO flair\n* If string or list of strings then text is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes."
+                },
+                "createdOn": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": "string"
+                        }
+                    ],
+                    "description": "A relative datetime description to match the date the Activity was created\n\nMay be either:\n\n* day of the week (monday, tuesday, etc...)\n* cron expression IE `* * 15 *`\n\nSee https://crontab.guru/ for generating expressions\n\nhttps://regexr.com/6u3cc"
                 },
                 "deleted": {
                     "type": "boolean"
@@ -874,8 +989,18 @@
                 "credentials": {
                     "$ref": "#/definitions/InfluxCredentials"
                 },
+                "debug": {
+                    "type": "boolean"
+                },
                 "defaultTags": {
                     "$ref": "#/definitions/Record<string,string>"
+                },
+                "useKeepAliveAgent": {
+                    "type": "boolean"
+                },
+                "writeOptions": {
+                    "$ref": "#/definitions/WriteOptions",
+                    "description": "Options used by{@linkWriteApi}."
                 }
             },
             "required": [
@@ -934,7 +1059,7 @@
                 "file": {
                     "allOf": [
                         {
-                            "$ref": "#/definitions/Omit<DailyRotateFileTransportOptions,\"stream\"|\"log\"|\"dirname\"|\"options\"|\"handleRejections\"|\"format\"|\"handleExceptions\"|\"logv\"|\"close\">"
+                            "$ref": "#/definitions/Omit<DailyRotateFileTransportOptions,\"stream\"|\"log\"|\"options\"|\"dirname\"|\"handleRejections\"|\"format\"|\"handleExceptions\"|\"logv\"|\"close\">"
                         },
                         {
                             "properties": {
@@ -1039,18 +1164,18 @@
                             "items": {
                                 "enum": [
                                     "comment",
+                                    false,
                                     "submission"
-                                ],
-                                "type": "string"
+                                ]
                             },
                             "type": "array"
                         },
                         {
                             "enum": [
                                 "comment",
+                                false,
                                 "submission"
-                            ],
-                            "type": "string"
+                            ]
                         }
                     ]
                 },
@@ -1088,6 +1213,9 @@
                             "type": "string"
                         }
                     ]
+                },
+                "referencesCurrentActivity": {
+                    "type": "boolean"
                 },
                 "search": {
                     "default": "current",
@@ -1140,18 +1268,18 @@
                             "items": {
                                 "enum": [
                                     "comment",
+                                    false,
                                     "submission"
-                                ],
-                                "type": "string"
+                                ]
                             },
                             "type": "array"
                         },
                         {
                             "enum": [
                                 "comment",
+                                false,
                                 "submission"
-                            ],
-                            "type": "string"
+                            ]
                         }
                     ]
                 },
@@ -1209,6 +1337,9 @@
                             "type": "string"
                         }
                     ]
+                },
+                "referencesCurrentActivity": {
+                    "type": "boolean"
                 },
                 "search": {
                     "default": "current",
@@ -1381,7 +1512,7 @@
             ],
             "type": "object"
         },
-        "Omit<DailyRotateFileTransportOptions,\"stream\"|\"log\"|\"dirname\"|\"options\"|\"handleRejections\"|\"format\"|\"handleExceptions\"|\"logv\"|\"close\">": {
+        "Omit<DailyRotateFileTransportOptions,\"stream\"|\"log\"|\"options\"|\"dirname\"|\"handleRejections\"|\"format\"|\"handleExceptions\"|\"logv\"|\"close\">": {
             "properties": {
                 "auditFile": {
                     "description": "A string representing the name of the name of the audit file. (default: './hash-audit.json')",
@@ -1471,16 +1602,6 @@
         },
         "OperatorCacheConfig": {
             "properties": {
-                "actionedEventsDefault": {
-                    "default": 25,
-                    "description": "The **default** number of Events that the cache will store triggered result summaries for\n\nThese summaries are viewable through the Web UI.\n\nThe value specified cannot be larger than `actionedEventsMax` for the global/bot config (if set)",
-                    "type": "number"
-                },
-                "actionedEventsMax": {
-                    "default": 25,
-                    "description": "The **maximum** number of Events that the cache should store triggered result summaries for\n\nThese summaries are viewable through the Web UI.\n\nThe value specified by a subreddit cannot be larger than the value set by the Operator for the global/bot config (if set)",
-                    "type": "number"
-                },
                 "authorTTL": {
                     "default": 60,
                     "description": "Amount of time, in seconds, author activity history (Comments/Submission) should be cached\n\n* If `0` or `true` will cache indefinitely (not recommended)\n* If `false` will not cache\n\n* ENV => `AUTHOR_TTL`\n* ARG => `--authorTTL <sec>`",
@@ -1834,6 +1955,88 @@
                     ],
                     "description": "* true/false => test whether Activity is approved or not\n* string or list of strings => test which moderator approved this Activity"
                 },
+                "authorFlairBackgroundColor": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "* If `true` then passes if ANY color\n* If `false` then passes if NO color\n* If string or list of strings then color is matched, case-insensitive, without #. String may also be a regular expression enclosed in forward slashes."
+                },
+                "authorFlairCssClass": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "* If `true` then passes if ANY class\n* If `false` then passes if NO class\n* If string or list of strings then class is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes."
+                },
+                "authorFlairTemplateId": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "* If `true` then passes if ANY flair\n* If `false` then passes if NO flair\n* If string or list of strings then template id is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes."
+                },
+                "authorFlairText": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "* If `true` then passes if ANY flair\n* If `false` then passes if NO flair\n* If string or list of strings then text is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes."
+                },
+                "createdOn": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": "string"
+                        }
+                    ],
+                    "description": "A relative datetime description to match the date the Activity was created\n\nMay be either:\n\n* day of the week (monday, tuesday, etc...)\n* cron expression IE `* * 15 *`\n\nSee https://crontab.guru/ for generating expressions\n\nhttps://regexr.com/6u3cc"
+                },
                 "deleted": {
                     "type": "boolean"
                 },
@@ -1884,6 +2087,23 @@
                 "is_self": {
                     "type": "boolean"
                 },
+                "link_flair_background_color": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": [
+                                "string",
+                                "boolean"
+                            ]
+                        }
+                    ],
+                    "description": "* If `true` then passes if ANY color\n* If `false` then passes if NO color\n* If string or list of strings then color is matched, case-insensitive, without #. String may also be a regular expression enclosed in forward slashes."
+                },
                 "link_flair_css_class": {
                     "anyOf": [
                         {
@@ -1899,7 +2119,7 @@
                             ]
                         }
                     ],
-                    "description": "* If `true` then passes if flair has ANY css\n* If `false` then passes if flair has NO css"
+                    "description": "* If `true` then passes if flair has ANY css\n* If `false` then passes if flair has NO css\n* If string or list of strings then class is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes."
                 },
                 "link_flair_text": {
                     "anyOf": [
@@ -1916,7 +2136,7 @@
                             ]
                         }
                     ],
-                    "description": "* If `true` then passes if flair has ANY text\n* If `false` then passes if flair has NO text"
+                    "description": "* If `true` then passes if flair has ANY text\n* If `false` then passes if flair has NO text\n* If string or list of strings then text is matched, case-insensitive. String may also be a regular expression enclosed in forward slashes."
                 },
                 "locked": {
                     "type": "boolean"
@@ -2030,6 +2250,14 @@
                 },
                 "name": {
                     "type": "string"
+                },
+                "wikiConfig": {
+                    "default": "botconfig/contextbot",
+                    "description": "The relative URL to the ContextMod wiki page EX `https://reddit.com/r/subreddit/wiki/<path>`\n\nThis will override the default relative URL as well as any URL set at the bot-level",
+                    "examples": [
+                        "botconfig/contextbot"
+                    ],
+                    "type": "string"
                 }
             },
             "required": [
@@ -2040,6 +2268,17 @@
         "ThirdPartyCredentialsJsonConfig": {
             "additionalProperties": {},
             "properties": {
+                "mhs": {
+                    "properties": {
+                        "apiKey": {
+                            "type": "string"
+                        }
+                    },
+                    "required": [
+                        "apiKey"
+                    ],
+                    "type": "object"
+                },
                 "youtube": {
                     "properties": {
                         "apiKey": {
@@ -2064,6 +2303,23 @@
                     ],
                     "pattern": "^\\s*(?<opStr>>|>=|<|<=)\\s*(?<value>\\d+)\\s*(?<percent>%?)\\s*(?<duration>in\\s+\\d+\\s*(days?|weeks?|months?|years?|hours?|minutes?|seconds?|milliseconds?))?\\s*(?<extra>asc.*|desc.*)*$",
                     "type": "string"
+                },
+                "note": {
+                    "anyOf": [
+                        {
+                            "items": {
+                                "type": "string"
+                            },
+                            "type": "array"
+                        },
+                        {
+                            "type": "string"
+                        }
+                    ],
+                    "description": "The content of the Note to search For.\n\n* Can be a single string or list of strings to search for. Each string will be searched for case-insensitive, as a subset of note content.\n* Can also be Regular Expression if wrapped in forward slashes IE '\\/test.*\\/i'"
+                },
+                "referencesCurrentActivity": {
+                    "type": "boolean"
                 },
                 "search": {
                     "default": "current",
@@ -2124,6 +2380,94 @@
                 }
             },
             "type": "object"
+        },
+        "WriteOptions": {
+            "description": "Options used by{@linkWriteApi}.",
+            "properties": {
+                "batchSize": {
+                    "description": "max number of records/lines to send in a batch",
+                    "type": "number"
+                },
+                "consistency": {
+                    "description": "InfluxDB Enterprise write consistency as explained in https://docs.influxdata.com/enterprise_influxdb/v1.9/concepts/clustering/#write-consistency",
+                    "enum": [
+                        "all",
+                        "any",
+                        "one",
+                        "quorum"
+                    ],
+                    "type": "string"
+                },
+                "defaultTags": {
+                    "$ref": "#/definitions/Record<string,string>",
+                    "description": "default tags, unescaped"
+                },
+                "exponentialBase": {
+                    "description": "base for the exponential retry delay",
+                    "type": "number"
+                },
+                "flushInterval": {
+                    "description": "delay between data flushes in milliseconds, at most `batch size` records are sent during flush",
+                    "type": "number"
+                },
+                "gzipThreshold": {
+                    "description": "When specified, write bodies larger than the threshold are gzipped",
+                    "type": "number"
+                },
+                "headers": {
+                    "additionalProperties": {
+                        "type": "string"
+                    },
+                    "description": "HTTP headers that will be sent with every write request",
+                    "type": "object"
+                },
+                "maxBatchBytes": {
+                    "description": "max size of a batch in bytes",
+                    "type": "number"
+                },
+                "maxBufferLines": {
+                    "description": "the maximum size of retry-buffer (in lines)",
+                    "type": "number"
+                },
+                "maxRetries": {
+                    "description": "max count of retries after the first write fails",
+                    "type": "number"
+                },
+                "maxRetryDelay": {
+                    "description": "maximum delay when retrying write (milliseconds)",
+                    "type": "number"
+                },
+                "maxRetryTime": {
+                    "description": "max time (millis) that can be spent with retries",
+                    "type": "number"
+                },
+                "minRetryDelay": {
+                    "description": "minimum delay when retrying write (milliseconds)",
+                    "type": "number"
+                },
+                "randomRetry": {
+                    "description": "randomRetry indicates whether the next retry delay is deterministic (false) or random (true).\nThe deterministic delay starts with `minRetryDelay * exponentialBase` and it is multiplied\nby `exponentialBase` until it exceeds `maxRetryDelay`.\nWhen random is `true`, the next delay is computed as a random number between next retry attempt (upper)\nand the lower number in the deterministic sequence. `random(retryJitter)` is added to every returned value.",
+                    "type": "boolean"
+                },
+                "retryJitter": {
+                    "description": "add `random(retryJitter)` milliseconds delay when retrying HTTP calls",
+                    "type": "number"
+                }
+            },
+            "required": [
+                "batchSize",
+                "exponentialBase",
+                "flushInterval",
+                "maxBatchBytes",
+                "maxBufferLines",
+                "maxRetries",
+                "maxRetryDelay",
+                "maxRetryTime",
+                "minRetryDelay",
+                "randomRetry",
+                "retryJitter"
+            ],
+            "type": "object"
         }
     },
     "description": "Configuration for application-level settings IE for running the bot instance\n\n* To load a JSON configuration **from the command line** use the `-c` cli argument EX: `node src/index.js -c /path/to/JSON/config.json`\n* To load a JSON configuration **using an environmental variable** use `OPERATOR_CONFIG` EX: `OPERATOR_CONFIG=/path/to/JSON/config.json`",
@@ -2132,7 +2476,7 @@
             "description": "Configuration for the **Server** application. See [Architecture Documentation](https://github.com/FoxxMD/context-mod/blob/master/docs/serverClientArchitecture.md) for more info",
             "properties": {
                 "friendly": {
-                    "description": "A friendly name for this server. This will override `friendly` in `BotConnection` if specified.",
+                    "description": "A friendly name for this server. This will override `friendly` in `BotConnection` if specified.\n\nIf none is set one is randomly generated.",
                     "type": "string"
                 },
                 "port": {
@@ -2421,20 +2765,6 @@
                         },
                         "migrations": {
                             "$ref": "#/definitions/DatabaseMigrationOptions"
-                        }
-                    },
-                    "type": "object"
-                },
-                "invites": {
-                    "description": "Settings related to oauth flow invites",
-                    "properties": {
-                        "maxAge": {
-                            "default": 0,
-                            "description": "Number of seconds an invite should be valid for\n\n If `0` or not specified (default) invites do not expire",
-                            "examples": [
-                                0
-                            ],
-                            "type": "number"
                         }
                     },
                     "type": "object"

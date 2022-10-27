@@ -2,13 +2,13 @@ import winston, {Logger} from "winston";
 import {
     asNamedCriteria, asWikiContext,
     buildCachePrefix, buildFilter, castToBool,
-    createAjvFactory, fileOrDirectoryIsWriteable,
+    createAjvFactory, fileOrDirectoryIsWriteable, generateRandomName,
     mergeArr, mergeFilters,
     normalizeName,
     overwriteMerge,
     parseBool, parseExternalUrl, parseUrlContext, parseWikiContext, randomId,
     readConfigFile,
-    removeUndefinedKeys, resolvePathFromEnvWithRelative
+    removeUndefinedKeys, resolvePathFromEnvWithRelative, toStrongSharingACLConfig
 } from "./util";
 
 import Ajv, {Schema} from 'ajv';
@@ -41,7 +41,7 @@ import {
     BotCredentialsJsonConfig,
     BotCredentialsConfig,
     OperatorFileConfig,
-    PostBehavior
+    PostBehavior, SharingACLConfig
 } from "./Common/interfaces";
 import {isRuleSetJSON, RuleSetConfigData, RuleSetConfigHydratedData, RuleSetConfigObject} from "./Rule/RuleSet";
 import deepEqual from "fast-deep-equal";
@@ -74,10 +74,11 @@ import {ErrorWithCause} from "pony-cause";
 import {RunConfigHydratedData, RunConfigData, RunConfigObject} from "./Run";
 import {AuthorRuleConfig} from "./Rule/AuthorRule";
 import {
-    CacheProvider, ConfigFormat, ConfigFragmentValidationFunc,
+    CacheProvider, ConfigFormat, ConfigFragmentParseFunc,
     PollOn
 } from "./Common/Infrastructure/Atomic";
 import {
+    asFilterOptionsJson,
     FilterCriteriaDefaults,
     FilterCriteriaDefaultsJson,
     MaybeAnonymousOrStringCriteria, MinimalOrFullFilter, MinimalOrFullFilterJson, NamedCriteria
@@ -98,6 +99,7 @@ import {SubredditResources} from "./Subreddit/SubredditResources";
 import {asIncludesData, IncludesData, IncludesString} from "./Common/Infrastructure/Includes";
 import ConfigParseError from "./Utils/ConfigParseError";
 import {InfluxClient} from "./Common/Influx/InfluxClient";
+import {BotInvite} from "./Common/Entities/BotInvite";
 
 export interface ConfigBuilderOptions {
     logger: Logger,
@@ -168,7 +170,7 @@ export class ConfigBuilder {
         return validateJson<SubredditConfigData>(config, appSchema, this.logger);
     }
 
-    async hydrateConfigFragment<T>(val: IncludesData | string | object, resource: SubredditResources, validateFunc?: ConfigFragmentValidationFunc): Promise<T[]> {
+    async hydrateConfigFragment<T>(val: IncludesData | string | object, resource: SubredditResources, parseFunc?: ConfigFragmentParseFunc, subreddit?: string): Promise<T[]> {
         let includes: IncludesData | undefined = undefined;
         if(typeof val === 'string') {
             const strContextResult = parseUrlContext(val);
@@ -196,7 +198,7 @@ export class ConfigBuilder {
             }
         }
 
-       const resolvedFragment = await resource.getConfigFragment(includes, validateFunc);
+       const resolvedFragment = await resource.getConfigFragment(includes, parseFunc);
         if(Array.isArray(resolvedFragment)) {
             return resolvedFragment
         }
@@ -229,18 +231,36 @@ export class ConfigBuilder {
             let hydratedRunArr: RunConfigData | RunConfigData[];
 
             try {
-                hydratedRunArr = await this.hydrateConfigFragment<RunConfigData>(r, resource, <RunConfigData>(data: object, fetched: boolean) => {
-                    if (fetched) {
-                        if (Array.isArray(data)) {
-                            for (const runData of data) {
+                hydratedRunArr = await this.hydrateConfigFragment<RunConfigData>(r, resource, <RunConfigData>(data: any, fetched: boolean, subreddit?: string) => {
+                    if(data.runs !== undefined && subreddit !== undefined) {
+                        const sharing: boolean | SharingACLConfig = data.sharing ?? false;
+                        if(sharing === false) {
+                            throw new ConfigParseError(`The resource defined at ${r} does not have sharing enabled.`);
+                        } else if(sharing !== true) {
+                            const strongAcl = toStrongSharingACLConfig(sharing);
+                            if(strongAcl.include !== undefined) {
+                                if(!strongAcl.include.some(x => x.test(resource.subreddit.display_name))) {
+                                    throw new ConfigParseError(`The resource defined at ${r} does not have sharing enabled for this subreddit.`);
+                                }
+                            } else if(strongAcl.exclude !== undefined) {
+                                if(strongAcl.exclude.some(x => x.test(resource.subreddit.display_name))) {
+                                    throw new ConfigParseError(`The resource defined at ${r} does not have sharing enabled for this subreddit.`);
+                                }
+                            }
+                        }
+                    }
+                    const runDataVals = data.runs !== undefined ? data.runs : data;
+                    if (!fetched) {
+                        if (Array.isArray(runDataVals)) {
+                            for (const runData of runDataVals) {
                                 validateJson<RunConfigData>(runData, runSchema, this.logger);
                             }
                         } else {
-                            validateJson<RunConfigData>(data, runSchema, this.logger);
+                            validateJson<RunConfigData>(runDataVals, runSchema, this.logger);
                         }
-                        return true;
+                        return runDataVals;
                     }
-                    return true;
+                    return runDataVals;
                 });
             } catch (e: any) {
                 throw new CMError(`Could not fetch or validate Run #${runIndex}`, {cause: e});
@@ -271,9 +291,9 @@ export class ConfigBuilder {
                                 } else {
                                     validateJson<ActivityCheckConfigHydratedData>(data, checkSchema, this.logger);
                                 }
-                                return true;
+                                return data;
                             }
-                            return true;
+                            return data;
                         });
                     } catch (e: any) {
                         throw new CMError(`Could not fetch or validate Check Config Fragment #${checkIndex} in Run #${runIndex}`, {cause: e});
@@ -362,12 +382,14 @@ export class ConfigBuilder {
         return validatedHydratedConfig;
     }
 
-    async parseToStructured(config: SubredditConfigData, resource: SubredditResources, filterCriteriaDefaultsFromBot?: FilterCriteriaDefaults, postCheckBehaviorDefaultsFromBot: PostBehavior = {}): Promise<RunConfigObject[]> {
+    async parseToHydrated(config: SubredditConfigData, resource: SubredditResources) {
+        return await this.hydrateConfig(config, resource);
+    }
+
+    async parseToStructured(hydratedConfig: SubredditConfigHydratedData, filterCriteriaDefaultsFromBot?: FilterCriteriaDefaults, postCheckBehaviorDefaultsFromBot: PostBehavior = {}): Promise<RunConfigObject[]> {
         let namedRules: Map<string, RuleConfigObject> = new Map();
         let namedActions: Map<string, ActionConfigObject> = new Map();
-        const {filterCriteriaDefaults, postCheckBehaviorDefaults} = config;
-
-        const hydratedConfig = await this.hydrateConfig(config, resource);
+        const {filterCriteriaDefaults, postCheckBehaviorDefaults} = hydratedConfig;
 
         const {runs: realRuns = []} = hydratedConfig;
 
@@ -417,6 +439,7 @@ export class ConfigBuilder {
             }
             structuredRuns.push({
                 ...r,
+                filterCriteriaDefaults: configFilterDefaultsFromRun,
                 checks: structuredChecks,
                 authorIs: derivedRunAuthorIs,
                 itemIs: derivedRunItemIs
@@ -526,7 +549,7 @@ const parseFilterJson = <T>(addToFilter: FilterJsonFuncArg<T>) => (val: MinimalO
         for (const v of val) {
             addToFilter(v);
         }
-    } else {
+    } else if(asFilterOptionsJson<T>(val)) {
         const {include = [], exclude = []} = val;
         for (const v of include) {
             addToFilter(v);
@@ -543,46 +566,6 @@ export const extractNamedFilters = (config: SubredditConfigHydratedData, namedAu
 
     const parseAuthorIs = parseFilterJson(addToAuthors);
     const parseItemIs = parseFilterJson(addToItems);
-
-    // const parseAuthorIs = (val: MinimalOrFullFilterJson<AuthorCriteria> | undefined) => {
-    //     if (val === undefined) {
-    //         return;
-    //     }
-    //     if (Array.isArray(val)) {
-    //         for (const v of val) {
-    //             addToAuthors(v);
-    //         }
-    //     } else {
-    //         const {include = [], exclude = []} = val;
-    //         for (const v of include) {
-    //             addToAuthors(v);
-    //         }
-    //         for (const v of exclude) {
-    //             addToAuthors(v);
-    //         }
-    //     }
-    // }
-
-    // const parseItemIs = (val: MinimalOrFullFilterJson<TypedActivityState> | undefined) => {
-    //     if (val === undefined) {
-    //         return;
-    //     }
-    //     if (Array.isArray(val)) {
-    //         for (const v of val) {
-    //             addToItems(v);
-    //         }
-    //     } else {
-    //         const {include = [], exclude = []} = val;
-    //         for (const v of include) {
-    //             addToItems(v);
-    //         }
-    //         for (const v of exclude) {
-    //             addToItems(v);
-    //         }
-    //     }
-    // }
-
-    //const namedRules = new Map();
 
     const {
         filterCriteriaDefaults,
@@ -641,7 +624,7 @@ const getNamedOrReturn = <T>(namedFilters: Map<string, NamedCriteria<T>>, filter
         if(!namedFilters.has(x.toLocaleLowerCase())) {
             throw new Error(`No named ${filterName} criteria with the name "${x}"`);
         }
-        return namedFilters.get(x) as NamedCriteria<T>;
+        return namedFilters.get(x.toLocaleLowerCase()) as NamedCriteria<T>;
     }
     if(asNamedCriteria(x)) {
         return x;
@@ -659,34 +642,36 @@ export const insertNameFilters = (namedAuthorFilters: Map<string, NamedCriteria<
         authorIs: undefined,
         itemIs: undefined,
     }
-    if(val.authorIs !== undefined) {
+    if (val.authorIs !== undefined) {
         if (Array.isArray(val.authorIs)) {
             runnableOpts.authorIs = val.authorIs.map(x => getNamedAuthorOrReturn(x))
-        } else {
-            runnableOpts.authorIs = {};
-
-            const {include, exclude} = val.authorIs;
-            if(include !== undefined) {
+        } else if (asFilterOptionsJson<AuthorCriteria>(val.authorIs)) {
+            const {include, exclude, ...rest} = val.authorIs;
+            runnableOpts.authorIs = {...rest};
+            if (include !== undefined) {
                 runnableOpts.authorIs.include = include.map(x => getNamedAuthorOrReturn(x))
-            }
-            if(exclude !== undefined) {
+            } else if (exclude !== undefined) {
                 runnableOpts.authorIs.exclude = exclude.map(x => getNamedAuthorOrReturn(x))
             }
+        } else {
+            // assume object is criteria
+            runnableOpts.authorIs = [getNamedAuthorOrReturn(val.authorIs)];
         }
     }
-    if(val.itemIs !== undefined) {
+    if (val.itemIs !== undefined) {
         if (Array.isArray(val.itemIs)) {
             runnableOpts.itemIs = val.itemIs.map(x => getNamedItemOrReturn(x))
-        } else {
-            runnableOpts.itemIs = {};
-
-            const {include, exclude} = val.itemIs;
-            if(include !== undefined) {
+        } else if (asFilterOptionsJson<TypedActivityState>(val.itemIs)) {
+            const {include, exclude, ...rest} = val.itemIs;
+            runnableOpts.itemIs = {...rest};
+            if (include !== undefined) {
                 runnableOpts.itemIs.include = include.map(x => getNamedItemOrReturn(x))
-            }
-            if(exclude !== undefined) {
+            } else if (exclude !== undefined) {
                 runnableOpts.itemIs.exclude = exclude.map(x => getNamedItemOrReturn(x))
             }
+        } else {
+            // assume object is criteria
+            runnableOpts.itemIs = [getNamedItemOrReturn(val.itemIs)];
         }
     }
 
@@ -1224,9 +1209,6 @@ export const buildOperatorConfigWithDefaults = async (data: OperatorJsonConfig):
                 maxAge: sessionMaxAge = 86400,
                 storage: sessionStorage = undefined,
             } = {},
-            invites: {
-                maxAge: inviteMaxAge = 0,
-            } = {},
             clients,
             credentials: webCredentials,
             operators,
@@ -1247,8 +1229,6 @@ export const buildOperatorConfigWithDefaults = async (data: OperatorJsonConfig):
 
     let cache: StrongCache;
     let defaultProvider: CacheOptions;
-    let opActionedEventsMax: number | undefined;
-    let opActionedEventsDefault: number = 25;
 
     const dataDir = process.env.DATA_DIR ?? defaultDataDir;
 
@@ -1260,16 +1240,10 @@ export const buildOperatorConfigWithDefaults = async (data: OperatorJsonConfig):
         cache = {
             ...cacheTTLDefaults,
             provider: defaultProvider,
-            actionedEventsDefault: opActionedEventsDefault,
         };
 
     } else {
-        const {provider, actionedEventsMax, actionedEventsDefault = opActionedEventsDefault, ...restConfig} = opCache;
-
-        if (actionedEventsMax !== undefined && actionedEventsMax !== null) {
-            opActionedEventsMax = actionedEventsMax;
-            opActionedEventsDefault = Math.min(actionedEventsDefault, actionedEventsMax);
-        }
+        const {provider, ...restConfig} = opCache;
 
         if (typeof provider === 'string') {
             defaultProvider = {
@@ -1287,8 +1261,6 @@ export const buildOperatorConfigWithDefaults = async (data: OperatorJsonConfig):
         cache = {
             ...cacheTTLDefaults,
             ...restConfig,
-            actionedEventsMax: opActionedEventsMax,
-            actionedEventsDefault: opActionedEventsDefault,
             provider: defaultProvider,
         }
     }
@@ -1331,12 +1303,36 @@ export const buildOperatorConfigWithDefaults = async (data: OperatorJsonConfig):
     }
     const webDbConfig = createDatabaseConfig(realdbConnectionWeb);
 
+    const appDataSource = await createAppDatabaseConnection(dbConfig, appLogger);
+
     let influx: InfluxClient | undefined = undefined;
     if(influxConfig !== undefined) {
         const tags = friendly !== undefined ? {server: friendly} : undefined;
         influx = new InfluxClient(influxConfig, appLogger, tags);
         await influx.isReady();
     }
+
+/*    let friendlyId: string;
+    if (friendly === undefined) {
+        let randFriendly: string = generateRandomName();
+        // see if we can get invites to check for unique name
+        // if this is a new instance will not be able to get it but try anyway
+        try {
+            const inviteRepo = appDataSource.getRepository(BotInvite);
+            const exists = async (name: string) => {
+                const existing = await inviteRepo.findBy({instance: name});
+                return existing.length > 0;
+            }
+            while (await exists(randFriendly)) {
+                randFriendly = generateRandomName();
+            }
+        } catch (e: any) {
+            // something went wrong, just ignore this
+        }
+        friendlyId = randFriendly;
+    } else {
+        friendlyId = friendly;
+    }*/
 
     const config: OperatorConfig = {
         mode,
@@ -1351,7 +1347,7 @@ export const buildOperatorConfigWithDefaults = async (data: OperatorJsonConfig):
             frequency,
             minFrequency
         },
-        database: await createAppDatabaseConnection(dbConfig, appLogger),
+        database: appDataSource,
         databaseConfig: {
             connection: dbConfig,
             migrations,
@@ -1371,9 +1367,6 @@ export const buildOperatorConfigWithDefaults = async (data: OperatorJsonConfig):
             },
             port,
             storage: webStorage,
-            invites: {
-                maxAge: inviteMaxAge,
-            },
             session: {
                 secret: sessionSecretFromConfig,
                 maxAge: sessionMaxAge,
@@ -1387,7 +1380,7 @@ export const buildOperatorConfigWithDefaults = async (data: OperatorJsonConfig):
         api: {
             port: apiPort,
             secret: apiSecret,
-            friendly
+            friendly,
         },
         bots: [],
         credentials,
@@ -1406,8 +1399,6 @@ export const buildBotConfig = (data: BotInstanceJsonConfig, opConfig: OperatorCo
     const {
         snoowrap: snoowrapOp,
         caching: {
-            actionedEventsMax: opActionedEventsMax,
-            actionedEventsDefault: opActionedEventsDefault = 25,
             provider: defaultProvider,
         } = {},
         userAgent,
@@ -1462,28 +1453,18 @@ export const buildBotConfig = (data: BotInstanceJsonConfig, opConfig: OperatorCo
 
         botCache = {
             ...cacheTTLDefaults,
-            actionedEventsDefault: opActionedEventsDefault,
-            actionedEventsMax: opActionedEventsMax,
             provider: {...defaultProvider as CacheOptions}
         };
     } else {
         const {
             provider,
-            actionedEventsMax = opActionedEventsMax,
-            actionedEventsDefault = opActionedEventsDefault,
             ...restConfig
         } = caching;
-
-        botActionedEventsDefault = actionedEventsDefault;
-        if (actionedEventsMax !== undefined) {
-            botActionedEventsDefault = Math.min(actionedEventsDefault, actionedEventsMax);
-        }
 
         if (typeof provider === 'string') {
             botCache = {
                 ...cacheTTLDefaults,
                 ...restConfig,
-                actionedEventsDefault: botActionedEventsDefault,
                 provider: {
                     store: provider as CacheProvider,
                     ...cacheOptDefaults
@@ -1494,8 +1475,6 @@ export const buildBotConfig = (data: BotInstanceJsonConfig, opConfig: OperatorCo
             botCache = {
                 ...cacheTTLDefaults,
                 ...restConfig,
-                actionedEventsDefault: botActionedEventsDefault,
-                actionedEventsMax,
                 provider: {
                     store,
                     ...cacheOptDefaults,

@@ -7,9 +7,10 @@ import {Rule, RuleJSONConfig, RuleOptions} from "./index";
 import Submission from "snoowrap/dist/objects/Submission";
 import dayjs from "dayjs";
 import {
+    asComment,
     asSubmission,
     FAIL,
-    formatNumber, getActivitySubredditName, historyFilterConfigToOptions, isSubmission,
+    formatNumber, getActivitySubredditName, historyFilterConfigToOptions, isComment, isSubmission,
     parseSubredditName,
     PASS,
     percentFromString, removeUndefinedKeys, toStrongSubredditState, windowConfigToWindowCriteria
@@ -20,6 +21,7 @@ import {CompareValueOrPercent} from "../Common/Infrastructure/Atomic";
 import {ActivityWindowConfig, ActivityWindowCriteria} from "../Common/Infrastructure/ActivityWindow";
 import {ErrorWithCause} from "pony-cause";
 import {comparisonTextOp, parseGenericValueOrPercentComparison} from "../Common/Infrastructure/Comparisons";
+import {getSubredditBreakdownByActivityType} from "../Utils/SnoowrapUtils";
 
 export interface CommentThresholdCriteria extends ThresholdCriteria {
     /**
@@ -78,6 +80,23 @@ export interface HistoryCriteria {
     total?: CompareValueOrPercent
 
     window: ActivityWindowConfig
+
+    ratio?: {
+        window: ActivityWindowConfig
+        /**
+         * A string containing a comparison operator and a value to compare number of parent criteria activities against number of "ratio" activities
+         *
+         * This comparison is always done as (number of parent criteria activities) / (number of ratio activities)
+         *
+         * The syntax is `(< OR > OR <= OR >=) <number>[percent sign]`
+         *
+         * * EX `> 1.2`  => There are 1.2 activities from parent criteria for every 1 ratio activities
+         * * EX `<= 75%` => There are equal to or less than 0.75 activities from parent criteria for every 1 ratio activities
+         *
+         * @pattern ^\s*(>|>=|<|<=)\s*((?:\d+)(?:(?:(?:.|,)\d+)+)?)\s*(%?)(.*)$
+         * */
+        threshold: CompareValueOrPercent
+    }
 
     /**
      * The minimum number of **filtered** activities that must exist from the `window` results for this criteria to run
@@ -168,7 +187,7 @@ export class HistoryRule extends Rule {
 
         for (const criteria of this.criteria) {
 
-            const {comment, window, submission, total, minActivityCount = 5} = criteria;
+            const {comment, window, submission, total, ratio, minActivityCount = 5} = criteria;
 
             const {pre: activities, post: filteredActivities} = await this.resources.getAuthorActivitiesWithFilter(item.author, window);
 
@@ -206,10 +225,11 @@ export class HistoryRule extends Rule {
                 fOpTotal = filteredCounts.opTotal;
             }
 
+            let asOp = false;
             let commentTrigger = undefined;
             if(comment !== undefined) {
                 const {operator, value, isPercent, extra = ''} = parseGenericValueOrPercentComparison(comment);
-                const asOp = extra.toLowerCase().includes('op');
+                 asOp = extra.toLowerCase().includes('op');
                 if(isPercent) {
                     const per = value / 100;
                     if(asOp) {
@@ -248,6 +268,24 @@ export class HistoryRule extends Rule {
                 }
             }
 
+            let foundRatio = undefined;
+            let ratioTrigger = undefined;
+            if(ratio !== undefined) {
+                const { window: ratioWindow, threshold: ratioThreshold } = ratio;
+                const {operator, value, isPercent, extra = ''} = parseGenericValueOrPercentComparison(ratioThreshold);
+                const ratioWindowConfig = windowConfigToWindowCriteria(ratioWindow);
+                const {post: ratioActivities} = await this.resources.getAuthorActivitiesWithFilter(item.author, ratioWindowConfig);
+
+                const ratioVal = filteredActivities.length / ratioActivities.length;
+                foundRatio = formatNumber(ratioVal);
+                if(isPercent) {
+                    const per = value / 100;
+                    ratioTrigger = comparisonTextOp(ratioVal, operator, per);
+                } else {
+                    ratioTrigger = comparisonTextOp(ratioVal, operator, value);
+                }
+            }
+
             const firstActivity = activities[0];
             const lastActivity = activities[activities.length - 1];
 
@@ -260,11 +298,14 @@ export class HistoryRule extends Rule {
                 submissionTotal: fSubmissionTotal,
                 commentTotal: fCommentTotal,
                 opTotal: fOpTotal,
+                foundRatio,
                 filteredTotal: filteredActivities.length,
                 submissionTrigger,
                 commentTrigger,
                 totalTrigger,
-                triggered: (submissionTrigger === undefined || submissionTrigger === true) && (commentTrigger === undefined || commentTrigger === true) && (totalTrigger === undefined || totalTrigger === true)
+                ratioTrigger,
+                triggered: (submissionTrigger === undefined || submissionTrigger === true) && (commentTrigger === undefined || commentTrigger === true) && (totalTrigger === undefined || totalTrigger === true) && (ratioTrigger === undefined || ratioTrigger === true),
+                subredditBreakdown: getSubredditBreakdownByActivityType(!asOp ? filteredActivities :  filteredActivities.filter(x => asSubmission(x) || x.is_submitter))
             });
         }
 
@@ -296,6 +337,12 @@ export class HistoryRule extends Rule {
 
             this.logger.verbose(`${PASS} ${resultData.result}`);
             return Promise.resolve([true, this.getResult(true, resultData)]);
+        } else {
+            // log failures for easier debugging
+            for(const res of criteriaResults) {
+                const resultData = this.generateResultDataFromCriteria(res);
+                this.logger.verbose(`${FAIL} ${resultData.result}`);
+            }
         }
 
         return Promise.resolve([false, this.getResult(false, {result: failCriteriaResult})]);
@@ -308,11 +355,13 @@ export class HistoryRule extends Rule {
             submissionTotal,
             commentTotal,
             filteredTotal,
+            foundRatio,
             opTotal,
             criteria: {
                 comment,
                 submission,
                 total,
+                ratio,
                 window,
             },
             criteria,
@@ -320,6 +369,8 @@ export class HistoryRule extends Rule {
             submissionTrigger,
             commentTrigger,
             totalTrigger,
+            ratioTrigger,
+            subredditBreakdown,
         } = results;
 
         const data: any = {
@@ -327,6 +378,7 @@ export class HistoryRule extends Rule {
             submissionTotal,
             commentTotal,
             filteredTotal,
+            foundRatio,
             opTotal,
             commentPercent: formatNumber((commentTotal/activityTotal)*100),
             submissionPercent: formatNumber((submissionTotal/activityTotal)*100),
@@ -338,12 +390,15 @@ export class HistoryRule extends Rule {
             submissionTrigger,
             commentTrigger,
             totalTrigger,
+            ratioTrigger,
+            subredditBreakdown
         };
 
         let thresholdSummary = [];
         let totalSummary;
         let submissionSummary;
         let commentSummary;
+        let ratioSummary;
         if(total !== undefined) {
             const {operator, value, isPercent, displayText} = parseGenericValueOrPercentComparison(total);
             const suffix = !isPercent ? 'Items' : `(${formatNumber((filteredTotal/activityTotal)*100)}%) of ${activityTotal} Total`;
@@ -367,6 +422,13 @@ export class HistoryRule extends Rule {
             commentSummary = `${includePassFailSymbols ? `${commentTrigger ? PASS : FAIL} ` : ''}${countType} (${asOp ? opTotal : commentTotal}) were${commentTrigger ? '' : ' not'} ${displayText} ${suffix}`;
             data.commentSummary = commentSummary;
             thresholdSummary.push(commentSummary);
+        }
+        if(ratio !== undefined) {
+            const {threshold} = ratio;
+            const {operator, value, isPercent, displayText, extra = ''} = parseGenericValueOrPercentComparison(threshold);
+            ratioSummary = `${includePassFailSymbols ? `${submissionTrigger ? PASS : FAIL} ` : ''}Activity Ratio of (${foundRatio}) ${ratioTrigger ? 'passed' : 'did not pass'} test of ${displayText}`;
+            data.ratioSummary = ratioSummary;
+            thresholdSummary.push(ratioSummary);
         }
 
         data.thresholdSummary = thresholdSummary.join(' and ');

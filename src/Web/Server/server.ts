@@ -13,16 +13,14 @@ import http from "http";
 import {heartbeat} from "./routes/authenticated/applicationRoutes";
 import logs from "./routes/authenticated/user/logs";
 import status from './routes/authenticated/user/status';
-import liveStats from './routes/authenticated/user/liveStats';
+import liveStats, {opStatResponse} from './routes/authenticated/user/liveStats';
 import {
     actionedEventsRoute,
-    actionRoute,
-    addInviteRoute,
+    actionRoute, addGuestModRoute,
     cancelDelayedRoute,
     configLocationRoute,
     configRoute,
-    deleteInviteRoute,
-    getInvitesRoute
+    removeGuestModRoute, saveGuestWikiEditRoute, removalReasonsRoute
 } from "./routes/authenticated/user";
 import action from "./routes/authenticated/user/action";
 import {authUserCheck, botRoute} from "./middleware";
@@ -37,6 +35,15 @@ import dayjs from "dayjs";
 import { sleep } from '../../util';
 import {Invokee} from "../../Common/Infrastructure/Atomic";
 import {Point} from "@influxdata/influxdb-client";
+import {
+    acceptSubredditInviteRoute,
+    addBotInviteRoute,
+    addSubredditInviteRoute,
+    deleteSubredditInviteRoute,
+    getBotInviteRoute,
+    getSubredditInviteRoute,
+    getSubredditInvitesRoute
+} from "./routes/authenticated/user/invites";
 
 const server = addAsync(express());
 server.use(bodyParser.json());
@@ -156,41 +163,8 @@ const rcbServer = async function (options: OperatorConfigWithFileContext) {
 
     server.getAsync('/logs', ...logs());
 
-    server.getAsync('/stats', [authUserCheck(), botRoute(false)], async (req: Request, res: Response) => {
-        let bots: Bot[] = [];
-        if(req.serverBot !== undefined) {
-            bots = [req.serverBot];
-        } else if(req.user !== undefined) {
-            bots = req.user.accessibleBots(req.botApp.bots);
-        }
-        const resp = [];
-        let index = 1;
-        for(const b of bots) {
-            resp.push({name: b.botName ?? `Bot ${index}`, data: {
-                    status: b.running ? 'RUNNING' : 'NOT RUNNING',
-                    indicator: b.running ? 'green' : 'red',
-                    running: b.running,
-                    startedAt: b.startedAt.local().format('MMMM D, YYYY h:mm A Z'),
-                    error: b.error,
-                    subreddits: req.user?.accessibleSubreddits(b).map((manager: Manager) => {
-                        let indicator;
-                        if (manager.managerState.state === RUNNING && manager.queueState.state === RUNNING && manager.eventsState.state === RUNNING) {
-                            indicator = 'green';
-                        } else if (manager.managerState.state === STOPPED && manager.queueState.state === STOPPED && manager.eventsState.state === STOPPED) {
-                            indicator = 'red';
-                        } else {
-                            indicator = 'yellow';
-                        }
-                        return {
-                            name: manager.displayLabel,
-                            indicator,
-                        };
-                    }),
-                }});
-            index++;
-        }
-        return res.json(resp);
-    });
+    server.getAsync('/stats', ...opStatResponse());
+
     const passLogs = async (req: Request, res: Response, next: Function) => {
         // @ts-ignore
         req.sysLogs = sysLogs;
@@ -204,6 +178,10 @@ const rcbServer = async function (options: OperatorConfigWithFileContext) {
 
     server.getAsync('/config/location', ...configLocationRoute);
 
+    server.postAsync('/config', ...saveGuestWikiEditRoute);
+
+    server.getAsync('/reasons', ...removalReasonsRoute);
+
     server.getAsync('/events', ...actionedEventsRoute);
 
     server.getAsync('/action', ...action);
@@ -212,13 +190,25 @@ const rcbServer = async function (options: OperatorConfigWithFileContext) {
 
     server.postAsync('/bot', ...addBot());
 
-    server.getAsync('/bot/invite', ...getInvitesRoute);
+    server.getAsync('/bot/invite', ...getSubredditInvitesRoute);
 
-    server.postAsync('/bot/invite', ...addInviteRoute);
+    server.getAsync('/bot/invite/:id', ...getSubredditInviteRoute);
 
-    server.deleteAsync('/bot/invite', ...deleteInviteRoute);
+    server.postAsync('/bot/invite/:id', ...acceptSubredditInviteRoute);
+
+    server.postAsync('/bot/invite', ...addSubredditInviteRoute);
+
+    server.deleteAsync('/bot/invite', ...deleteSubredditInviteRoute);
 
     server.deleteAsync('/delayed', ...cancelDelayedRoute);
+
+    server.deleteAsync('/guests', ...removeGuestModRoute);
+
+    server.postAsync('/guests', ...addGuestModRoute);
+
+    server.getAsync('/invites/:id', ...getBotInviteRoute);
+
+    server.postAsync('/invites', ...addBotInviteRoute);
 
     app = new App(options);
 

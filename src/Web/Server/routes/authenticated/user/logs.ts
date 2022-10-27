@@ -45,7 +45,6 @@ const logs = () => {
 
         const userName = req.user?.name as string;
         const isOperator = req.user?.isInstanceOperator(req.botApp);
-        const realManagers = req.botApp.bots.map(x => req.user?.accessibleSubreddits(x).map(x => x.displayLabel)).flat() as string[];
         const {level = 'verbose', stream, limit = 200, sort = 'descending', streamObjects = false, formatted: formattedVal = true, transports: transportsVal = false} = req.query;
 
         const formatted = formattedVal as boolean;
@@ -68,16 +67,16 @@ const logs = () => {
             }
         }
 
-        //const allReq = req.query.subreddit !== undefined && (req.query.subreddit as string).toLowerCase() === 'all';
-
         if (stream) {
 
             const requestedManagers = managers.map(x => x.displayLabel);
             const requestedBots = bots.map(x => x.botName);
 
             const origin = req.header('X-Forwarded-For') ?? req.header('host');
+            const stream = logger.stream();
             try {
-                logger.stream().on('log', (log: LogInfo) => {
+
+                stream.on('log', (log: LogInfo) => {
                     if (isLogLineMinLevel(log, level as string)) {
                         const {subreddit: subName, bot, user} = log;
                         let canAccess = false;
@@ -108,13 +107,13 @@ const logs = () => {
                 logger.info(`${userName} from ${origin} => CONNECTED`);
                 await pEvent(req, 'close');
                 //logger.debug('Request closed detected with "close" listener');
-                res.destroy();
                 return;
             } catch (e: any) {
                 if (e.code !== 'ECONNRESET') {
                     logger.error(e);
                 }
             } finally {
+                stream.removeAllListeners();
                 logger.info(`${userName} from ${origin} => DISCONNECTED`);
                 res.destroy();
             }

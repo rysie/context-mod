@@ -22,6 +22,7 @@ This list is not exhaustive. [For complete documentation on a subreddit's config
     * [Regex](#regex)
     * [Repost](#repost)
     * [Sentiment Analysis](#sentiment-analysis)
+    * [Toxic Content Prediction](#moderatehatespeechcom-predictions)
 * [Rule Sets](#rule-sets)
 * [Actions](#actions)
   * [Named Actions](#named-actions)
@@ -29,6 +30,7 @@ This list is not exhaustive. [For complete documentation on a subreddit's config
   * [List of Actions](#list-of-actions)
     * [Approve](#approve)
     * [Ban](#ban)
+    * [Submission](#submission)
     * [Comment](#comment)
     * [Contributor (Add/Remove)](#contributor)
     * [Dispatch/Delay](#dispatch)
@@ -68,6 +70,7 @@ This list is not exhaustive. [For complete documentation on a subreddit's config
     * [Rule Order](#rule-order)
   * [Configuration Re-use and Caching](#configuration-re-use-and-caching)
   * [Partial Configurations](#partial-configurations)
+    * [Sharing Configs Between Subreddits](#sharing-full-configs-as-runs)
 * [Subreddit-ready examples](#subreddit-ready-examples)
 
 # Runs
@@ -376,6 +379,12 @@ This rule is for searching **all of Reddit** for reposts, as opposed to just the
 
 The **Sentiment Rule** is used to determine the overall emotional intent (negative, neutral, positive) of a Submission or Comment by analyzing the actual text content of the Activity.
 
+### ModerateHateSpeech.com Predictions
+
+[**Full Documentation**](/docs/subreddit/components/mhs)
+
+ContextMod integrates with [moderatehatespeech.com](https://moderatehatespeech.com/) (MHS) [toxic content machine learning model](https://moderatehatespeech.com/framework/) through their API. This rule sends an Activity's content (title or body) to MHS which returns a prediction on whether the content is toxic and actionable by a moderator. Their model is [specifically trained for reddit content.](https://www.reddit.com/r/redditdev/comments/xdscbo/updated_bot_backed_by_moderationoriented_ml_for/)
+
 # Rule Sets
 
 The `rules` list on a `Check` can contain both `Rule` objects and `RuleSet` objects.
@@ -494,10 +503,29 @@ actions:
 
 ### Comment
 
-Reply to the Activity being processed with a comment. [Schema Documentation](https://json-schema.app/view/%23/%23%2Fdefinitions%2FSubmissionCheckJson/%23%2Fdefinitions%2FCommentActionJson?url=https%3A%2F%2Fraw.githubusercontent.com%2FFoxxMD%2Freddit-context-bot%2Fmaster%2Fsrc%2FSchema%2FApp.json)
+Reply to an Activity with a comment. [Schema Documentation](https://json-schema.app/view/%23/%23%2Fdefinitions%2FSubmissionCheckJson/%23%2Fdefinitions%2FCommentActionJson?url=https%3A%2F%2Fraw.githubusercontent.com%2FFoxxMD%2Freddit-context-bot%2Fmaster%2Fsrc%2FSchema%2FApp.json)
 
 * If the Activity is a Submission the comment is a top-level reply
 * If the Activity is a Comment the comment is a child reply
+
+#### Templating
+
+`content` can be [templated](#templating) and use [URL Tokens](#url-tokens)
+
+#### Targets
+
+Optionally, specify the Activity CM should reply to. **When not specified CM replies to the Activity being processed using `self`**
+
+Valid values: `self`, `parent`, or a Reddit permalink.
+
+`self` and `parent` are special targets that are relative to the Activity being processed:
+
+* When the Activity being processed is a **Submission** => `parent` logs a warning and does nothing
+* When the Activity being processed is a  **Comment**
+  * `self` => reply to Comment
+  * `parent` => make a top-level Comment in the **Submission** the Comment belong to
+
+If target is not self/parent then CM assumes the value is a **reddit permalink** and will attempt to make a Comment to that Activity
 
 ```yaml
 actions:
@@ -506,7 +534,71 @@ actions:
     distinguish: boolean # distinguish as a mod
     sticky: boolean # sticky comment
     lock: boolean # lock the comment after creation
+    targets: string # 'self' or 'parent' or 'https://reddit.com/r/someSubreddit/21nfdi....'
+```
 
+### Submission
+
+Create a Submission [Schema Documentation](https://json-schema.app/view/%23/%23%2Fdefinitions%2FSubmissionCheckJson/%23%2Fdefinitions%2FSubmissionActionJson?url=https%3A%2F%2Fraw.githubusercontent.com%2FFoxxMD%2Freddit-context-bot%2Fmaster%2Fsrc%2FSchema%2FApp.json)
+
+The Submission type, Link or Self-Post, is determined based on the presence of `url` in the action's configuration.
+
+```yaml
+actions:
+  - kind: submission
+    title: string # required, the title of the submission. can be templated.
+    content: string # the body of the submission. can be templated
+    url: string # if specified the submission will be a Link Submission. can be templated
+    distinguish: boolean # distinguish as a mod
+    sticky: boolean # sticky comment
+    lock: boolean # lock the comment after creation
+    nsfw: boolean # mark submission as NSFW
+    spoiler: boolean # mark submission as a spoiler
+    flairId: string # flair template id for submission
+    flairText: string # flair text for submission
+    targets: string # 'self' or a subreddit name IE mealtimevideos
+```
+
+#### Templating
+
+`content`,`url`, and `title` can be [templated](#templating) and use [URL Tokens](#url-tokens)
+
+TIP: To create a Link Submission pointing to the Activity currently being processed use
+
+```yaml
+actions:
+  - kind: submission
+    url: {{item.permalink}}
+    # ...
+```
+
+#### Targets
+
+Optionally, specify the Subreddit the Submission should be made in. **When not specified CM uses `self`**
+
+Valid values: `self` or Subreddit Name
+
+* `self` => (**Default**) Create Submission in the same Subreddit of the Activity being processed
+* Subreddit Name => Create Submission in given subreddit IE `mealtimevideos`
+  * Your bot must be able to access and be able to post in the given subreddit
+
+Example: 
+
+```yaml
+actions:
+  - kind: comment
+    targets: mealtimevideos
+```
+
+To post to multiple subreddits use a list:
+
+```yaml
+actions:
+  - kind: comment
+    targets:
+      - self
+      - mealtimevideos
+      - anotherSubreddit 
 ```
 
 ### Contributor
@@ -608,30 +700,34 @@ Some other things to note:
 * If the `to` property is not specified then the message is sent to the Author of the Activity being processed
   * `to` may be a **User** (u/aUser) or a **Subreddit** (r/aSubreddit)
   * `to` **cannot** be a Subreddit when `asSubreddit: true` -- IE cannot send subreddit-to-subreddit messages
-* `content` can be [templated](#templating) and use [URL Tokens](#url-tokens)
+  * TIP: `to` can be templated -- to send a message to the subreddit the Activity being processed is in use `'r/{{item.subreddit}}'`
+* `content` and `title` can be [templated](#templating) and use [URL Tokens](#url-tokens)
 
 ```yaml
 actions:
   - kind: message
     asSubreddit: true
-    content: 'A message sent as the subreddit'
-    title: 'Title of the message'
-    to: 'u/aUser' # do not specify 'to' in order default to sending to Author of Activity being processed
+    content: 'A message sent as the subreddit' # can be templated
+    title: 'Title of the message' # can be templated
+    to: 'u/aUser' # do not specify 'to' in order default to sending to Author of Activity being processed. Can also be templated
 ```
 
 ### Remove
 
 Remove the Activity being processed. [Schema Documentation](https://json-schema.app/view/%23/%23%2Fdefinitions%2FSubmissionCheckJson/%23%2Fdefinitions%2FRemoveActionJson?url=https%3A%2F%2Fraw.githubusercontent.com%2FFoxxMD%2Freddit-context-bot%2Fedge%2Fsrc%2FSchema%2FApp.json)
 
+* **note** can be [templated](#templating)
+* **reasonId** IDs can be found in the [editor](/docs/webInterface.md) using the **Removal Reasons** popup
+
+If neither note nor reasonId are included then no removal reason is added.
+
 ```yaml
 actions:
   - kind: remove
-    spam: boolean # optional, mark as spam on removal
+    spam: false # optional, mark as spam on removal
+    note: 'a moderator-readable note' # optional, a note only visible to moderators (new reddit only)
+    reasonId: '2n0f4674-365e-46d2-8fc7-a337d85d5340' # optional, the ID of a removal reason to add to the removal action (new reddit only)
 ```
-
-#### What About Removal Reason?
-
-Reddit does not support setting a removal reason through the API. Please complain in [r/modsupport](https://www.reddit.com/r/modsupport) or [r/redditdev](https://www.reddit.com/r/redditdev) to help get this added :)
 
 ### Report
 
@@ -659,7 +755,7 @@ actions:
   - kind: usernote
     type: spamwarn
     content: 'Usernote message'
-    allowDuplicate: boolean # if false then the usernote will not be added if the same note appears for this activity
+    existingNoteCheck: boolean # if true (default) then the usernote will not be added if the same note appears for this activity
 ```
 
 ### Mod Note
@@ -684,6 +780,7 @@ actions:
     type: SPAM_WATCH
     content: 'a note only mods can see message' # optional
     referenceActivity: boolean # if true the Note will be linked to the Activity being processed
+    existingNoteCheck: boolean # if true (default) then the note will not be added if the same note appears for this activity
 ```
 
 # Filters
@@ -1151,6 +1248,49 @@ The object contains:
 * `path` -- REQUIRED string following rules above
 * `ttl` -- OPTIONAL, number of seconds to cache the URL result. Defaults to `WikiTTL`
 
+### Sharing Full Configs as Runs
+
+If the Fragment fetched by CM is a "full config" (including `runs`, `polling`, etc...) that could be used as a valid config for another subreddit then CM will extract and use the **Runs** from that config.
+
+**However, the config must also explicitly allow access for use as a Fragment.** This is to prevent subreddits that share a Bot account from accidentally (or intentionally) gaining access to another subreddit's config with permissions.
+
+#### Sharing
+
+The config that will be shared (accessed at `wiki:botconfig/contextbot|SharingSubreddit`) must have the `sharing` property defined at its top-level. If `sharing` is not defined access will be denied for all subreddits.
+
+```yaml
+sharing: false # deny access to all subreddits (default when sharing is not defined)
+
+polling:
+  - newComm
+
+runs:
+  # ...
+```
+
+```yaml
+sharing: true # any subreddit can use this config (reddit account must also be able to access wiki page)
+```
+
+```yaml
+# when a list is given all subreddit names that match any from the list are ALLOWED to access the config
+# list can be regular expressions or case-insensitive strings
+sharing:
+  - mealtimevideos
+  - videos
+  - '/Ask.*/i' 
+```
+
+```yaml
+# if `exclude` is used then any subreddit name that is NOT on this list can access the config
+# list can be regular expressions or case-insensitive strings
+sharing:
+  exclude:
+    - mealtimevideos
+    - videos
+    - '/Ask.*/i' 
+```
+
 #### Examples
 
 **Replacing A Rule with a URL Fragment**
@@ -1173,7 +1313,7 @@ runs:
             subreddits:
               - MyBadSubreddit
         window: 7 days
-      actions:
+    actions:
       - kind: report
         content: 'uses freekarma subreddits and bad subreddits'
 ```
@@ -1208,6 +1348,33 @@ runs:
         content: 'uses freekarma subreddits'
 ```
 
+**Using Another Subreddit's Config**
+
+```yaml
+runs:
+- `wiki:botconfig/contextbot|SharingSubreddit`
+- name: MySubredditSpecificRun
+  checks:
+  - name: Free Karma Alert
+    description: Check if author has posted in 'freekarma' subreddits
+    kind: submission
+    rules:
+      - 'wiki:freeKarmaFrag'
+    actions:
+      - kind: report
+        content: 'uses freekarma subreddits'
+```
+
+In `r/SharingSubreddit`:
+
+```yaml
+sharing: true
+
+runs:
+  - name: ARun
+    # ...
+```
+
 # Subreddit-Ready Examples
 
-Refer to the [Subreddit-Ready Examples](/docs/subreddit/components/subredditReady) section to find ready-to-use configurations for common scenarios (spam, freekarma blocking, etc...). This is also a good place to familiarize yourself with what complete configurations look like.
+Refer to the [Subreddit Cookbook Examples](/docs/subreddit/components/cookbook) section to find ready-to-use configurations for common scenarios (spam, freekarma blocking, etc...). This is also a good place to familiarize yourself with what complete configurations look like.

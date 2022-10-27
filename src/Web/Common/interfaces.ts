@@ -1,6 +1,9 @@
 import {RunningState} from "../../Subreddit/Manager";
-import {LogInfo, ManagerStats} from "../../Common/interfaces";
-import {BotInstance} from "../interfaces";
+import {BotConnection, LogInfo, ManagerStats} from "../../Common/interfaces";
+import {Guest, GuestAll} from "../../Common/Entities/Guest/GuestInterfaces";
+import {URL} from "url";
+import {Dayjs} from "dayjs";
+import {Subreddit} from "snoowrap/dist/objects";
 
 export interface BotStats {
     startedAtHuman: string,
@@ -50,6 +53,7 @@ export interface SubredditDataResponse {
     heartbeatHuman?: string
     heartbeat: number
     retention: string
+    guests: (Guest | GuestAll)[]
 }
 
 export interface BotStatusResponse {
@@ -77,14 +81,76 @@ export interface IUser {
     tokenExpiresAt?: number
 }
 
+export interface ManagerResponse {
+    name: string,
+    subreddit: string,
+    guests: Guest[]
+}
+
+export interface NormalizedManagerResponse extends ManagerResponse {
+    subredditNormal: string
+}
+
+export interface BotSubredditInviteResponse {
+    subreddit: string
+    id: string
+}
+
+export interface BotInstanceResponse {
+    botName: string
+    //botLink: string
+    error?: string
+    managers: ManagerResponse[]
+    nanny?: string
+    running: boolean
+    invites: BotSubredditInviteResponse[]
+}
+
+export interface SubredditOnboardingReadiness {
+    hasManager: boolean
+    isMod: boolean
+}
+
+export interface BotInstanceFunctions {
+    getSubreddits: (normalized?: boolean) => string[]
+    getAccessibleSubreddits: (user: string, subreddits: string[]) => string[]
+    getManagerNames: () => string[]
+    getGuestManagers: (user: string) => NormalizedManagerResponse[]
+    getGuestSubreddits: (user: string) => string[]
+    canUserAccessBot: (user: string, subreddits: string[]) => boolean
+    canUserAccessSubreddit: (subreddit: string, user: string, subreddits: string[]) => boolean
+    getInvite(val: string): BotSubredditInviteResponse | undefined
+}
+
+export interface BotInstance extends BotInstanceResponse, BotInstanceFunctions {
+    managers: NormalizedManagerResponse[]
+    instance: CMInstanceInterface
+}
+
+export interface CMInstanceInterface extends BotConnection {
+    friendly?: string
+    operators: string[]
+    operatorDisplay: string
+    url: URL,
+    normalUrl: string,
+    lastCheck?: number
+    online: boolean
+    subreddits: string[]
+    bots: BotInstance[]
+    error?: string
+    ranMigrations: boolean
+    migrationBlocker?: string
+    invites: string[]
+}
+
 export interface HeartbeatResponse {
     ranMigrations: boolean
     migrationBlocker?: string
-    subreddits: string[]
     operators: string[]
     operatorDisplay?: string
     friendly?: string
-    bots: BotInstance[]
+    bots: BotInstanceResponse[]
+    invites: string[]
 }
 
 
@@ -97,4 +163,22 @@ export interface InviteData {
     redirectUri: string
     creator: string
     overwrite?: boolean
+    initialConfig?: string
+    expiresAt?: number | Dayjs
+    guests?: string[]
+}
+
+export interface SubredditInviteData {
+    subreddit: string
+    guests?: string[]
+    initialConfig?: string
+    expiresAt?: number | Dayjs
+}
+
+export interface HydratedSubredditInviteData extends Omit<SubredditInviteData, 'subreddit'>{
+    subreddit: string | Subreddit
+}
+
+export interface SubredditInviteDataPersisted extends SubredditInviteData {
+    id: string
 }

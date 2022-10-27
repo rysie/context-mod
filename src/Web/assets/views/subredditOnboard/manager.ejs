@@ -1,0 +1,107 @@
+<html lang="en">
+<%- include('../partials/head', {title: 'CM Manage Subreddit Onboarding'}) %>
+<body class="bg-gray-900 text-white">
+<div class="min-w-screen min-h-screen font-sans">
+    <%- include('../partials/title', {title: 'Manage Subreddit Onboarding'}) %>
+    <div class="container mx-auto">
+        <div class="grid">
+            <div class="bg-gray-600">
+                <div class="p-6 md:px-10 md:py-6">
+                    <div id="error" class="font-semibold"></div>
+                    <ul id="sublist" class="list-inside list-disc mb-5">
+                        <li id="noSubs">Not accepting any invitations...</li>
+                    </ul>
+                    <a id="subredditInviteHelper" href="/bot/invites/subreddit">Create Subreddit Onboarding Invites</a>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+</body>
+<script>
+    window.addEventListener('load', function () {
+        const sl = document.querySelector('#sublist');
+
+        fetch(`/api/bot/invite${document.location.search}`, {
+            method: 'GET',
+            headers: {
+                'Accept': 'application/json',
+            }
+        }).then((resp) => {
+            if (!resp.ok) {
+                resp.text().then(data => {
+                    document.querySelector('#error').innerHTML = `Error occurred while fetching configuration => ${data}`
+                });
+            } else {
+                resp.json().then(data => {
+                    if (data.length > 0) {
+                        const ns = document.querySelector('#noSubs');
+                        if(ns !== null) {
+                            document.querySelector('#noSubs').style = 'display: none;';
+                        }
+                        sl.removeChild(sl.childNodes[1]);
+                    }
+                    for (const sub of data) {
+                        addSubredditElement(sub);
+                    }
+                });
+            }
+        });
+
+        let helperLink = document.querySelector('#subredditInviteHelper');
+        const url = new URL(helperLink.href)
+        for (let [k,v] of new URLSearchParams(window.location.search).entries()){
+            url.searchParams.set(k,v)
+        }
+        helperLink.href = url.toString();
+
+        function addSubredditElement(data) {
+            const {
+                subreddit: sub,
+                guests,
+                initialConfig,
+                expiresAt,
+                id,
+            } = data;
+            var node = document.createElement("LI");
+            node.id = `subInvite-${sub}`;
+            var textNode = document.createTextNode(sub);
+            node.appendChild(textNode);
+            node.insertAdjacentHTML('beforeend', `<a href="" class="removeSub" id="removeSub-${sub}" data-subreddit="${sub}"><span style="display:inline; margin-left: 10px" class="iconify-inline" data-icon="icons8:cancel"></span></a>`);
+
+            const parts = [
+                `<li><a href="${document.location.origin}/bot/invites/subreddit/${id}">${document.location.origin}/bot/invites/subreddit/${id}</a></li>`
+            ];
+            if(guests !== null && guests !== undefined) {
+                parts.push(`<li>Guests: ${guests.join(', ')}`);
+            }
+            if(initialConfig !== null && initialConfig !== undefined) {
+                parts.push(`<li>Initial Config: <a href="${initialConfig}">${initialConfig}</a>`);
+            }
+
+            node.insertAdjacentHTML('beforeend',`<ul class="list-inside list-disc mb-5">${parts.join('\n')}</ul`)
+
+            sl.appendChild(node);
+            document.querySelector(`#removeSub-${sub}`).addEventListener('click', e => {
+                e.preventDefault();
+
+                fetch(`/api/bot/invite${document.location.search}&subreddit=${sub}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                    }
+                }).then((resp) => {
+                    if (!resp.ok) {
+                        resp.text().then(t => {
+                            document.querySelector("#error").innerHTML = t;
+                        });
+                    } else {
+                        document.querySelector(`#subInvite-${sub}`).remove();
+                    }
+                });
+            });
+        }
+    });
+</script>
+</html>

@@ -1,23 +1,24 @@
 import winston, {Logger} from "winston";
 import dayjs, {Dayjs} from 'dayjs';
 import {Duration} from 'dayjs/plugin/duration.js';
+import * as cronjs from '@datasert/cronjs-matcher';
 import Ajv from "ajv";
 import {InvalidOptionArgumentError} from "commander";
 import {deflateSync, inflateSync} from "zlib";
 import pixelmatch from 'pixelmatch';
 import os from 'os';
 import pathUtil from 'path';
-import {Response} from 'node-fetch';
+import fetch, {Response} from 'node-fetch';
 import crypto, {createHash} from 'crypto';
 import {
     ActionResult,
     ActivityDispatch,
     ActivityDispatchConfig,
-    CacheOptions,
     CheckSummary,
     ImageComparisonResult,
     ItemCritPropHelper,
-    LogInfo, NamedGroup,
+    LogInfo,
+    NamedGroup,
     PollingOptionsStrong,
     PostBehaviorOptionConfig,
     RegExResult,
@@ -28,20 +29,17 @@ import {
     RuleResult,
     RuleSetResult,
     RunResult,
-    SearchAndReplaceRegExp,
-    StringComparisonOptions
+    SearchAndReplaceRegExp, SharingACLConfig,
+    StringComparisonOptions, StrongSharingACLConfig, StrongTTLConfig, TTLConfig
 } from "./Common/interfaces";
 import InvalidRegexError from "./Utils/InvalidRegexError";
 import {accessSync, constants, promises} from "fs";
-import {cacheOptDefaults, VERSION} from "./Common/defaults";
-import cacheManager, {Cache} from "cache-manager";
-import redisStore from "cache-manager-redis-store";
+import {cacheTTLDefaults, VERSION} from "./Common/defaults";
+import cacheManager from "cache-manager";
 import Autolinker from 'autolinker';
-import {create as createMemoryStore} from './Utils/memoryStore';
 import {LEVEL, MESSAGE} from "triple-beam";
 import {Comment, PrivateMessage, RedditUser, Submission, Subreddit} from "snoowrap/dist/objects";
 import reRegExp from '@stdlib/regexp-regexp';
-import fetch from "node-fetch";
 import ImageData from "./Common/ImageData";
 import {Sharp, SharpOptions} from "sharp";
 import {ErrorWithCause, stackWithCauses} from "pony-cause";
@@ -70,18 +68,22 @@ import {
     UserNoteCriteria
 } from "./Common/Infrastructure/Filters/FilterCriteria";
 import {
-    ActivitySource,
+    ActivitySourceData,
     ActivitySourceTypes,
-    CacheProvider,
+    ActivitySourceValue,
     ConfigFormat,
-    DurationVal, ExternalUrlContext,
+    DurationVal,
+    ExternalUrlContext,
+    ImageHashCacheData,
     ModUserNoteLabel,
     modUserNoteLabels,
     RedditEntity,
     RedditEntityType,
+    RelativeDateTimeMatch,
     statFrequencies,
     StatisticFrequency,
-    StatisticFrequencyOption, UrlContext,
+    StatisticFrequencyOption,
+    UrlContext,
     WikiContext
 } from "./Common/Infrastructure/Atomic";
 import {
@@ -116,6 +118,8 @@ import {
 } from "./Common/Infrastructure/ActivityWindow";
 import {RunnableBaseJson} from "./Common/Infrastructure/Runnable";
 import Snoowrap from "snoowrap";
+import {adjectives, animals, colors, uniqueNamesGenerator} from 'unique-names-generator';
+import {ActionResultEntity} from "./Common/Entities/ActionResultEntity";
 
 
 //import {ResembleSingleCallbackComparisonResult} from "resemblejs";
@@ -215,8 +219,26 @@ const errorAwareFormat = {
     }
 }
 
-const isProbablyError = (val: any, errName = 'error') => {
-    return typeof val === 'object' && val.name !== undefined && val.name.toLowerCase().includes(errName);
+const isProbablyError = (val: any, explicitErrorName?: string) => {
+    if(typeof val !== 'object' || val === null) {
+        return false;
+    }
+    const {name, stack} = val;
+    if(explicitErrorName !== undefined) {
+        if(name !== undefined && name.toLowerCase().includes(explicitErrorName)) {
+            return true;
+        }
+        if(stack !== undefined && stack.trim().toLowerCase().indexOf(explicitErrorName.toLowerCase()) === 0) {
+            return true;
+        }
+        return false;
+    } else if(stack !== undefined) {
+        return true;
+    } else if(name !== undefined && name.toLowerCase().includes('error')) {
+        return true;
+    }
+
+    return false;
 }
 
 export const PASS = '✓';
@@ -707,8 +729,7 @@ export const deflateUserNotes = (usersObject: object) => {
     const binaryData = deflateSync(jsonString);
 
     // Convert binary data to a base64 string with a Buffer
-    const blob = Buffer.from(binaryData).toString('base64');
-    return blob;
+    return Buffer.from(binaryData).toString('base64');
 }
 
 export const isActivityWindowConfig = (val: any): val is FullActivityWindowConfig => {
@@ -762,6 +783,34 @@ export const parseDuration = (val: string, strict = true): Duration => {
         throw new SimpleError(`Must only have one Duration value, found ${res.length} in: ${val}`);
     }
     return res[0].duration;
+}
+
+// https://stackoverflow.com/a/63729682
+const RELATIVE_DATETIME_REGEX: RegExp = /(?<cron>(?:(?:(?:(?:\d+,)+\d+|(?:\d+(?:\/|-|#)\d+)|\d+L?|\*(?:\/\d+)?|L(?:-\d+)?|\?|[A-Z]{3}(?:-[A-Z]{3})?) ?){5,7})$)|(?<dayofweek>mon|tues|wed|thurs|fri|sat|sun){1}/i;
+const RELATIVE_DATETIME_REGEX_URL = 'https://regexr.com/6u3cc';
+
+// https://day.js.org/docs/en/get-set/day
+const dayOfWeekMap: Record<string, number> = {
+    sun: 0,
+    mon: 1,
+    tues: 2,
+    wed: 3,
+    thurs: 4,
+    fri: 5,
+    sat: 6,
+};
+
+export const matchesRelativeDateTime = (expr: RelativeDateTimeMatch, dt: Dayjs) => {
+    const res = parseRegexSingleOrFail(RELATIVE_DATETIME_REGEX, expr);
+    if (res === undefined) {
+        throw new InvalidRegexError(RELATIVE_DATETIME_REGEX, expr, RELATIVE_DATETIME_REGEX_URL);
+    }
+    if (res.named.dayofweek !== undefined) {
+        return dayOfWeekMap[res.named.dayofweek] === dt.day();
+    }
+    // assume 5-point cron expression
+    // the matcher requires datetime second field to be 0 https://github.com/datasert/cronjs/issues/31
+    return cronjs.isTimeMatches(res.named.cron, dt.set('second', 0).toISOString());
 }
 
 const SUBREDDIT_NAME_REGEX: RegExp = /^\s*(?:\/r\/|r\/)*(\w+)*\s*$/;
@@ -1713,40 +1762,30 @@ export const cacheStats = (): ResourceStats => {
     };
 }
 
-export const buildCacheOptionsFromProvider = (provider: CacheProvider | any): CacheOptions => {
-    if(typeof provider === 'string') {
-        return {
-            store: provider as CacheProvider,
-            ...cacheOptDefaults
-        }
-    }
-    return {
-        store: 'memory',
-        ...cacheOptDefaults,
-        ...provider,
-    }
-}
+export const toStrongTTLConfig = (data: TTLConfig): StrongTTLConfig => {
+    const {
+        userNotesTTL = cacheTTLDefaults.userNotesTTL,
+        authorTTL = cacheTTLDefaults.authorTTL,
+        wikiTTL = cacheTTLDefaults.wikiTTL,
+        filterCriteriaTTL = cacheTTLDefaults.filterCriteriaTTL,
+        selfTTL = cacheTTLDefaults.selfTTL,
+        submissionTTL = cacheTTLDefaults.submissionTTL,
+        commentTTL = cacheTTLDefaults.commentTTL,
+        subredditTTL = cacheTTLDefaults.subredditTTL,
+        modNotesTTL = cacheTTLDefaults.modNotesTTL,
+    } = data;
 
-export const createCacheManager = (options: CacheOptions): Cache => {
-    const {store, max, ttl = 60, host = 'localhost', port, auth_pass, db, ...rest} = options;
-    switch (store) {
-        case 'none':
-            return cacheManager.caching({store: 'none', max, ttl});
-        case 'redis':
-            return cacheManager.caching({
-                store: redisStore,
-                host,
-                port,
-                auth_pass,
-                db,
-                ttl,
-                ...rest,
-            });
-        case 'memory':
-        default:
-            //return cacheManager.caching({store: 'memory', max, ttl});
-            return cacheManager.caching({store: {create: createMemoryStore}, max, ttl, shouldCloneBeforeSet: false});
-    }
+    return {
+        authorTTL: authorTTL === true ? 0 : authorTTL,
+        submissionTTL: submissionTTL === true ? 0 : submissionTTL,
+        commentTTL: commentTTL === true ? 0 : commentTTL,
+        subredditTTL: subredditTTL === true ? 0 : subredditTTL,
+        wikiTTL: wikiTTL === true ? 0 : wikiTTL,
+        filterCriteriaTTL: filterCriteriaTTL === true ? 0 : filterCriteriaTTL,
+        modNotesTTL: modNotesTTL === true ? 0 : modNotesTTL,
+        selfTTL: selfTTL === true ? 0 : selfTTL,
+        userNotesTTL: userNotesTTL === true ? 0 : userNotesTTL,
+    };
 }
 
 export const randomId = () => crypto.randomBytes(20).toString('hex');
@@ -1933,21 +1972,28 @@ export function findLastIndex<T>(array: Array<T>, predicate: (value: T, index: n
     return -1;
 }
 
-export const parseRuleResultsToMarkdownSummary = (ruleResults: RuleResultEntity[]): string => {
+export const parseResultsToMarkdownSummary = (ruleResults: (RuleResultEntity | ActionResultEntity)[]): string => {
     const results = ruleResults.map((y) => {
         let name = y.premise.name;
         const kind = y.premise.kind.name;
         if(name === undefined) {
             name = kind;
         }
-        const {triggered, result, ...restY} = y;
+        let runIndicator = null;
+        if(y instanceof RuleResultEntity) {
+            runIndicator = y.triggered;
+        } else {
+            runIndicator = y.success;
+        }
+        const {result, ...restY} = y;
+
         let t = triggeredIndicator(false);
-        if(triggered === null) {
+        if(runIndicator === null) {
             t = 'Skipped';
-        } else if(triggered === true) {
+        } else if(runIndicator === true) {
             t = triggeredIndicator(true);
         }
-        return `* ${name} - ${t} - ${result || '-'}`;
+        return `* ${name} - ${t}${result !== undefined ? ` - ${result}` : ''}`;
     });
     return results.join('\r\n');
 }
@@ -2429,19 +2475,48 @@ export const mergeFilters = (objectConfig: RunnableBaseJson, filterDefs: FilterC
 
     let derivedAuthorIs: AuthorOptions = buildFilter(authorIsDefault);
     if (authorIsBehavior === 'merge') {
-        derivedAuthorIs = merge.all([authorIs, authorIsDefault], {arrayMerge: removeFromSourceIfKeysExistsInDestination});
-    } else if (Object.keys(authorIs).length > 0) {
+        derivedAuthorIs = {
+            excludeCondition: authorIs.excludeCondition ?? derivedAuthorIs.excludeCondition,
+            include: addNonConflictingCriteria(derivedAuthorIs.include, authorIs.include),
+            exclude: addNonConflictingCriteria(derivedAuthorIs.exclude, authorIs.exclude),
+        }
+    } else if (!filterIsEmpty(authorIs)) {
         derivedAuthorIs = authorIs;
     }
 
     let derivedItemIs: ItemOptions = buildFilter(itemIsDefault);
     if (itemIsBehavior === 'merge') {
-        derivedItemIs = merge.all([itemIs, itemIsDefault], {arrayMerge: removeFromSourceIfKeysExistsInDestination});
-    } else if (Object.keys(itemIs).length > 0) {
+        derivedItemIs = {
+            excludeCondition: itemIs.excludeCondition ?? derivedItemIs.excludeCondition,
+            include: addNonConflictingCriteria(derivedItemIs.include, itemIs.include),
+            exclude: addNonConflictingCriteria(derivedItemIs.exclude, itemIs.exclude),
+        }
+    } else if (!filterIsEmpty(itemIs)) {
         derivedItemIs = itemIs;
     }
 
     return [derivedAuthorIs, derivedItemIs];
+}
+
+export const addNonConflictingCriteria = <T>(defaultCriteria: NamedCriteria<T>[] = [], explicitCriteria: NamedCriteria<T>[] = []): NamedCriteria<T>[] => {
+    if(explicitCriteria.length === 0) {
+        return defaultCriteria;
+    }
+    const allExplicitKeys = Array.from(explicitCriteria.reduce((acc, curr) => {
+        Object.keys(curr.criteria).forEach(key => acc.add(key));
+        return acc;
+    }, new Set()));
+    const nonConflicting = defaultCriteria.filter(x => {
+        return intersect(Object.keys(x.criteria), allExplicitKeys).length === 0;
+    });
+    if(nonConflicting.length > 0) {
+        return explicitCriteria.concat(nonConflicting);
+    }
+    return explicitCriteria;
+}
+
+export const filterIsEmpty = (obj: FilterOptions<any>): boolean => {
+    return (obj.include === undefined || obj.include.length === 0) && (obj.exclude === undefined || obj.exclude.length === 0);
 }
 
 export const buildFilter = (filterVal: MinimalOrFullMaybeAnonymousFilter<AuthorCriteria | TypedActivityState | ActivityState>): FilterOptions<AuthorCriteria | TypedActivityState | ActivityState> => {
@@ -2547,28 +2622,7 @@ export const normalizeCriteria = <T extends AuthorCriteria | TypedActivityState 
             criteria.description = Array.isArray(criteria.description) ? criteria.description : [criteria.description];
         }
         if(criteria.modActions !== undefined) {
-            criteria.modActions.map((x, index) => {
-                const common = {
-                    ...x,
-                    type: x.type === undefined ? undefined : (Array.isArray(x.type) ? x.type : [x.type])
-                }
-                if(asModNoteCriteria(x)) {
-                    return {
-                        ...common,
-                        noteType: x.noteType === undefined ? undefined : (Array.isArray(x.noteType) ? x.noteType : [x.noteType]),
-                        note: x.note === undefined ? undefined : (Array.isArray(x.note) ? x.note : [x.note]),
-                    }
-                } else if(asModLogCriteria(x)) {
-                    return {
-                        ...common,
-                        action: x.action === undefined ? undefined : (Array.isArray(x.action) ? x.action : [x.action]),
-                        details: x.details === undefined ? undefined : (Array.isArray(x.details) ? x.details : [x.details]),
-                        description: x.description === undefined ? undefined : (Array.isArray(x.description) ? x.description : [x.description]),
-                        activityType: x.activityType === undefined ? undefined : (Array.isArray(x.activityType) ? x.activityType : [x.activityType]),
-                    }
-                }
-                return common;
-            })
+            criteria.modActions.map((x, index) => normalizeModActionCriteria(x));
         }
     }
 
@@ -2576,6 +2630,29 @@ export const normalizeCriteria = <T extends AuthorCriteria | TypedActivityState 
         name,
         criteria
     };
+}
+
+export const normalizeModActionCriteria = (x: (ModNoteCriteria | ModLogCriteria)): (ModNoteCriteria | ModLogCriteria) => {
+    const common = {
+        ...x,
+        type: x.type === undefined ? undefined : (Array.isArray(x.type) ? x.type : [x.type])
+    }
+    if(asModNoteCriteria(x)) {
+        return {
+            ...common,
+            noteType: x.noteType === undefined ? undefined : (Array.isArray(x.noteType) ? x.noteType : [x.noteType]),
+            note: x.note === undefined ? undefined : (Array.isArray(x.note) ? x.note : [x.note]),
+        }
+    } else if(asModLogCriteria(x)) {
+        return {
+            ...common,
+            action: x.action === undefined ? undefined : (Array.isArray(x.action) ? x.action : [x.action]),
+            details: x.details === undefined ? undefined : (Array.isArray(x.details) ? x.details : [x.details]),
+            description: x.description === undefined ? undefined : (Array.isArray(x.description) ? x.description : [x.description]),
+            activityType: x.activityType === undefined ? undefined : (Array.isArray(x.activityType) ? x.activityType : [x.activityType]),
+        }
+    }
+    return common;
 }
 
 export const asNamedCriteria = <T>(val: MaybeAnonymousCriteria<T> | undefined): val is NamedCriteria<T> => {
@@ -2665,17 +2742,30 @@ export const isCommentState = (state: TypedActivityState): state is CommentState
 const DISPATCH_REGEX: RegExp = /^dispatch:/i;
 const POLL_REGEX: RegExp = /^poll:/i;
 const USER_REGEX: RegExp = /^user:/i;
-export const asActivitySource = (val: string): val is ActivitySource => {
+const ACTIVITY_SOURCE_REGEX: RegExp = /^(?<type>dispatch|poll|user)(?:$|:(?<identifier>[^\s\r\n]+)$)/i
+const ACTIVITY_SOURCE_REGEX_URL = 'https://regexr.com/6uqn6';
+export const asActivitySourceValue = (val: string): val is ActivitySourceValue => {
     if(['dispatch','poll','user'].some(x => x === val)) {
         return true;
     }
     return DISPATCH_REGEX.test(val) || POLL_REGEX.test(val) || USER_REGEX.test(val);
 }
 
-export const strToActivitySource = (val: string): ActivitySource => {
+export const asActivitySource = (val: any): val is ActivitySourceData => {
+    return null !== val && typeof val === 'object' && 'type' in val;
+}
+
+export const strToActivitySourceData = (val: string): ActivitySourceData => {
     const cleanStr = val.trim();
-    if (asActivitySource(cleanStr)) {
-        return cleanStr;
+    if (asActivitySourceValue(cleanStr)) {
+        const res = parseRegexSingleOrFail(ACTIVITY_SOURCE_REGEX, cleanStr);
+        if (res === undefined) {
+            throw new InvalidRegexError(ACTIVITY_SOURCE_REGEX, cleanStr, ACTIVITY_SOURCE_REGEX_URL, 'Could not parse activity source');
+        }
+        return {
+            type: res.named.type,
+            identifier: res.named.identifier
+        }
     }
     throw new SimpleError(`'${cleanStr}' is not a valid ActivitySource. Must be one of: dispatch, dispatch:[identifier], poll, poll:[identifier], user, or user:[identifier]`);
 }
@@ -2830,6 +2920,11 @@ export const resolvePath = (pathVal: string, relativeRoot: string) => {
     return pathUtil.resolve(relativeRoot, pathVal);
 }
 
+export const getExtension = (pathVal: string) => {
+    const pathInfo = pathUtil.parse(pathVal);
+    return pathInfo.ext;
+}
+
 export const resolvePathFromEnvWithRelative = (pathVal: any, relativeRoot: string, defaultVal?: string) => {
     if (pathVal === undefined || pathVal === null) {
         return defaultVal;
@@ -2937,4 +3032,36 @@ export function partition<T>(array: T[], callback: (element: T, index: number, a
             return result;
         }, [[], []]
     );
+}
+
+export const generateRandomName = () => {
+    return uniqueNamesGenerator({
+        dictionaries: [colors, adjectives, animals],
+        style: 'capital',
+        separator: ''
+    });
+}
+
+export const asStrongImageHashCache = (data: ImageHashCacheData): data is Required<ImageHashCacheData> => {
+    return data.original !== undefined && data.flipped !== undefined;
+}
+
+export const generateFullWikiUrl = (subreddit: Subreddit | string, location: string) => {
+    const subName = subreddit instanceof Subreddit ? subreddit.url : `r/${subreddit}/`;
+    return `https://reddit.com${subName}wiki/${location}`
+}
+
+export const toStrongSharingACLConfig = (data: SharingACLConfig | string[]): StrongSharingACLConfig => {
+    if (Array.isArray(data)) {
+        return {
+            include: data.map(x => parseStringToRegexOrLiteralSearch(x))
+        }
+    } else if (data.include !== undefined) {
+        return {
+            include: data.include.map(x => parseStringToRegexOrLiteralSearch(x))
+        }
+    }
+    return {
+        exclude: (data.exclude ?? []).map(x => parseStringToRegexOrLiteralSearch(x))
+    }
 }

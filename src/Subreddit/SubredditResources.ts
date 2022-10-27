@@ -1,38 +1,44 @@
-import Snoowrap, {Listing} from "snoowrap";
 import objectHash from 'object-hash';
 import {
-    activityIsDeleted, activityIsFiltered,
+    activityIsDeleted,
+    activityIsFiltered,
     activityIsRemoved,
-    AuthorTypedActivitiesOptions, BOT_LINK,
-    getAuthorHistoryAPIOptions, renderContent
+    getAuthorHistoryAPIOptions,
+    renderContent,
+    TemplateContext
 } from "../Utils/SnoowrapUtils";
 import {map as mapAsync} from 'async';
 import winston, {Logger} from "winston";
-import as from 'async';
-import fetch, {Response} from 'node-fetch';
+import {Response} from 'node-fetch';
 import {
     asActivity,
+    asComment,
+    asStrongImageHashCache,
     asSubmission,
+    asSubreddit,
     asUserNoteCriteria,
-    buildCacheOptionsFromProvider,
-    buildCachePrefix,
     cacheStats,
-    createCacheManager,
+    criteriaPassWithIncludeBehavior,
     escapeRegex,
     FAIL,
     fetchExternalResult,
+    filterByTimeRequirement,
     filterCriteriaSummary,
     formatNumber,
+    frequencyEqualOrLargerThanMin,
+    generateFullWikiUrl,
     generateItemFilterHelpers,
     getActivityAuthorName,
     getActivitySubredditName,
-    isComment,
     isCommentState,
+    isRuleSetResult,
     isStrongSubredditState,
     isSubmission,
     isUser,
-    hashString,
+    matchesRelativeDateTime,
     mergeArr,
+    modActionCriteriaSummary,
+    parseDurationValToDuration,
     parseExternalUrl,
     parseRedditEntity,
     parseStringToRegex,
@@ -41,61 +47,31 @@ import {
     redisScanIterator,
     removeUndefinedKeys,
     shouldCacheSubredditStateCriteriaResult,
-    strToActivitySource,
     subredditStateIsNameOnly,
     testMaybeStringRegex,
-    toStrongSubredditState,
+    toStrongSubredditState, toStrongTTLConfig,
     truncateStringToLength,
-    userNoteCriteriaSummary,
-    asComment,
-    criteriaPassWithIncludeBehavior,
-    isRuleSetResult,
-    frequencyEqualOrLargerThanMin,
-    parseDurationValToDuration,
-    windowConfigToWindowCriteria,
-    asStrongSubredditState,
-    convertSubredditsRawToStrong,
-    filterByTimeRequirement,
-    asSubreddit,
-    modActionCriteriaSummary,
-    parseRedditFullname
+    userNoteCriteriaSummary
 } from "../util";
-import LoggedError from "../Utils/LoggedError";
 import {
-    BotInstanceConfig,
-    CacheOptions,
-    Footer,
-    OperatorConfig,
-    ResourceStats,
-    StrongCache,
-    CacheConfig,
-    TTLConfig,
-    UserResultCache,
-    ActionedEvent,
-    ThirdPartyCredentialsJsonConfig,
-    RequiredItemCrit,
-    ItemCritPropHelper,
     ActivityDispatch,
-    HistoricalStatsDisplay
+    CacheConfig,
+    Footer,
+    HistoricalStatsDisplay,
+    ResourceStats, StrongTTLConfig,
+    ThirdPartyCredentialsJsonConfig
 } from "../Common/interfaces";
 import UserNotes from "./UserNotes";
-import Mustache from "mustache";
-import he from "he";
-import {SPoll} from "./Streams";
 import {Cache} from 'cache-manager';
-import {Submission, Comment, Subreddit, RedditUser} from "snoowrap/dist/objects";
-import {
-    cacheTTLDefaults,
-    createHistoricalDisplayDefaults,
-} from "../Common/defaults";
+import {Comment, RedditUser, Submission, Subreddit, WikiPage} from "snoowrap/dist/objects";
+import {cacheTTLDefaults, createHistoricalDisplayDefaults,} from "../Common/defaults";
 import {ExtendedSnoowrap} from "../Utils/SnoowrapClients";
 import dayjs, {Dayjs} from "dayjs";
 import ImageData from "../Common/ImageData";
-import {DataSource, Repository, SelectQueryBuilder, Between, LessThan, DeleteQueryBuilder} from "typeorm";
-import {CMEvent as ActionedEventEntity, CMEvent } from "../Common/Entities/CMEvent";
+import {Between, DataSource, DeleteQueryBuilder, LessThan, Repository, SelectQueryBuilder} from "typeorm";
+import {CMEvent as ActionedEventEntity, CMEvent} from "../Common/Entities/CMEvent";
 import {RuleResultEntity} from "../Common/Entities/RuleResultEntity";
 import globrex from 'globrex';
-import {runMigrations} from "../Common/Migrations/CacheMigrationUtils";
 import {CMError, isStatusError, MaybeSeriousErrorWithCause, SimpleError} from "../Utils/Errors";
 import {ErrorWithCause} from "pony-cause";
 import {ManagerEntity} from "../Common/Entities/ManagerEntity";
@@ -104,8 +80,6 @@ import {DispatchedEntity} from "../Common/Entities/DispatchedEntity";
 import {ActivitySourceEntity} from "../Common/Entities/ActivitySourceEntity";
 import {TotalStat} from "../Common/Entities/Stats/TotalStat";
 import {TimeSeriesStat} from "../Common/Entities/Stats/TimeSeriesStat";
-import {InvokeeType} from "../Common/Entities/InvokeeType";
-import {RunStateType} from "../Common/Entities/RunStateType";
 import {CheckResultEntity} from "../Common/Entities/CheckResultEntity";
 import {RuleSetResultEntity} from "../Common/Entities/RuleSetResultEntity";
 import {RulePremise} from "../Common/Entities/RulePremise";
@@ -113,21 +87,39 @@ import cloneDeep from "lodash/cloneDeep";
 import {
     asModLogCriteria,
     asModNoteCriteria,
-    AuthorCriteria, CommentState, ModLogCriteria, ModNoteCriteria, orderedAuthorCriteriaProps, RequiredAuthorCrit,
-    StrongSubredditCriteria, SubmissionState,
-    SubredditCriteria, toFullModLogCriteria, toFullModNoteCriteria, TypedActivityState, TypedActivityStates,
+    AuthorCriteria,
+    cmToSnoowrapActivityMap, cmToSnoowrapAuthorMap,
+    CommentState,
+    ModLogCriteria,
+    ModNoteCriteria,
+    orderedAuthorCriteriaProps,
+    RequiredAuthorCrit,
+    StrongSubredditCriteria,
+    SubmissionState,
+    SubredditCriteria,
+    toFullModLogCriteria,
+    toFullModNoteCriteria, toFullUserNoteCriteria,
+    TypedActivityState,
     UserNoteCriteria
 } from "../Common/Infrastructure/Filters/FilterCriteria";
 import {
-    ActivitySource, ConfigFragmentValidationFunc, DurationVal,
+    ActivitySourceValue,
+    ConfigFragmentParseFunc,
+    DurationVal,
     EventRetentionPolicyRange,
+    ImageHashCacheData,
     JoinOperands,
     ModActionType,
-    ModeratorNameCriteria, ModUserNoteLabel, statFrequencies, StatisticFrequency,
-    StatisticFrequencyOption
+    ModeratorNameCriteria,
+    ModUserNoteLabel,
+    RelativeDateTimeMatch,
+    statFrequencies,
+    StatisticFrequencyOption,
+    WikiContext
 } from "../Common/Infrastructure/Atomic";
 import {
-    AuthorOptions, FilterCriteriaPropertyResult,
+    AuthorOptions,
+    FilterCriteriaPropertyResult,
     FilterCriteriaResult,
     FilterResult,
     ItemOptions,
@@ -141,149 +133,81 @@ import {
 } from "../Common/Infrastructure/ActivityWindow";
 import {Duration} from "dayjs/plugin/duration";
 import {
-    activityReports,
-
     ActivityType,
     AuthorHistorySort,
-    CachedFetchedActivitiesResult, FetchedActivitiesResult,
-    SnoowrapActivity
+    CachedFetchedActivitiesResult,
+    FetchedActivitiesResult, RedditUserLike,
+    SnoowrapActivity,
+    SubredditLike,
+    SubredditRemovalReason
 } from "../Common/Infrastructure/Reddit";
 import {AuthorCritPropHelper} from "../Common/Infrastructure/Filters/AuthorCritPropHelper";
 import {NoopLogger} from "../Utils/loggerFactory";
 import {
-    compareDurationValue, comparisonTextOp,
+    compareDurationValue,
+    comparisonTextOp,
     parseDurationComparison,
     parseGenericValueComparison,
-    parseGenericValueOrPercentComparison, parseReportComparison
+    parseGenericValueOrPercentComparison,
+    parseReportComparison
 } from "../Common/Infrastructure/Comparisons";
 import {asCreateModNoteData, CreateModNoteData, ModNote, ModNoteRaw} from "./ModNotes/ModNote";
 import {IncludesData} from "../Common/Infrastructure/Includes";
 import {parseFromJsonOrYamlToObject} from "../Common/Config/ConfigUtil";
 import ConfigParseError from "../Utils/ConfigParseError";
 import {ActivityReport} from "../Common/Entities/ActivityReport";
+import {ActionResultEntity} from "../Common/Entities/ActionResultEntity";
+import {ActivitySource} from "../Common/ActivitySource";
+import {SubredditResourceOptions} from "../Common/Subreddit/SubredditResourceInterfaces";
+import {SubredditStats} from "./Stats";
+import {CMCache} from "../Common/Cache";
 
-export const DEFAULT_FOOTER = '\r\n*****\r\nThis action was performed by [a bot.]({{botLink}}) Mention a moderator or [send a modmail]({{modmailLink}}) if you any ideas, questions, or concerns about this action.';
+export const DEFAULT_FOOTER = '\r\n*****\r\nThis action was performed by [a bot.]({{botLink}}) Mention a moderator or [send a modmail]({{modmailLink}}) if you have any ideas, questions, or concerns about this action.';
 
-/**
- * Only used for migrating stats from cache to db
- * */
-interface OldHistoricalStats {
-    eventsCheckedTotal: number
-    eventsActionedTotal: number
-    checksRun: Map<string, number>
-    checksFromCache: Map<string, number>
-    checksTriggered: Map<string, number>
-    rulesRun: Map<string, number>
-    //rulesCached: Map<string, number>
-    rulesCachedTotal: number
-    rulesTriggered: Map<string, number>
-    actionsRun: Map<string, number>
-    [index: string]: any
-}
-
-export interface SubredditResourceConfig extends Footer {
-    caching?: CacheConfig,
-    subreddit: Subreddit,
-    logger: Logger;
-    client: ExtendedSnoowrap
-    credentials?: ThirdPartyCredentialsJsonConfig
-    managerEntity: ManagerEntity
-    botEntity: Bot
-    statFrequency: StatisticFrequencyOption
-    retention?: EventRetentionPolicyRange
-}
-
-interface SubredditResourceOptions extends Footer {
-    ttl: Required<TTLConfig>
-    cache: Cache
-    cacheType: string;
-    cacheSettingsHash: string
-    subreddit: Subreddit,
-    database: DataSource
-    logger: Logger;
-    client: ExtendedSnoowrap;
-    prefix?: string;
-    actionedEventsMax: number;
-    thirdPartyCredentials: ThirdPartyCredentialsJsonConfig
-    delayedItems?: ActivityDispatch[]
-    botAccount?: string
-    botName: string
-    managerEntity: ManagerEntity
-    botEntity: Bot
-    statFrequency: StatisticFrequencyOption
-    retention?: EventRetentionPolicyRange
-}
-
-export interface SubredditResourceSetOptions extends CacheConfig, Footer {
+export interface ExternalResourceOptions {
+    subreddit?: Subreddit
+    defaultTo?: 'url' | 'wiki',
+    force?: boolean
+    shared?: boolean,
+    ttl?: number
 }
 
 export class SubredditResources {
+    
+    ttl: StrongTTLConfig;
     //enabled!: boolean;
     protected useSubredditAuthorCache!: boolean;
-    protected authorTTL: number | false = cacheTTLDefaults.authorTTL;
-    protected subredditTTL: number | false = cacheTTLDefaults.subredditTTL;
-    protected wikiTTL: number | false = cacheTTLDefaults.wikiTTL;
-    protected submissionTTL: number | false = cacheTTLDefaults.submissionTTL;
-    protected commentTTL: number | false = cacheTTLDefaults.commentTTL;
-    protected filterCriteriaTTL: number | false = cacheTTLDefaults.filterCriteriaTTL;
-    protected modNotesTTL: number | false = cacheTTLDefaults.modNotesTTL;
-    public selfTTL: number | false = cacheTTLDefaults.selfTTL;
     name: string;
     botName: string;
-    protected logger: Logger;
+    logger: Logger;
     userNotes: UserNotes;
     footer: false | string = DEFAULT_FOOTER;
     subreddit: Subreddit
     database: DataSource
     client: ExtendedSnoowrap
-    cache: Cache
-    cacheType: string
+    cache: CMCache
     cacheSettingsHash?: string;
-    pruneInterval?: any;
-    historicalSaveInterval?: any;
-    prefix?: string
-    actionedEventsMax: number;
     thirdPartyCredentials: ThirdPartyCredentialsJsonConfig;
     delayedItems: ActivityDispatch[] = [];
     botAccount?: string;
     dispatchedActivityRepo: Repository<DispatchedEntity>
     activitySourceRepo: Repository<ActivitySourceEntity>
-    totalStatsRepo: Repository<TotalStat>
-    totalStatsEntities?: TotalStat[];
-    tsStatsRepo: Repository<TimeSeriesStat>
-    timeSeriesStatsEntities?: TimeSeriesStat[];
-    statFrequency: StatisticFrequencyOption
     retention?: EventRetentionPolicyRange
     managerEntity: ManagerEntity
     botEntity: Bot
-
-    stats: {
-        cache: ResourceStats
-        historical: HistoricalStatsDisplay
-        timeSeries: HistoricalStatsDisplay
-    };
+    
+    subredditStats: SubredditStats
 
     constructor(name: string, options: SubredditResourceOptions) {
         const {
             subreddit,
             logger,
-            ttl: {
-                userNotesTTL,
-                authorTTL,
-                wikiTTL,
-                filterCriteriaTTL,
-                selfTTL,
-                submissionTTL,
-                commentTTL,
-                subredditTTL,
-                modNotesTTL,
-            },
+            ttl,
             botName,
             database,
             cache,
             prefix,
             cacheType,
-            actionedEventsMax,
             cacheSettingsHash,
             client,
             thirdPartyCredentials,
@@ -292,7 +216,8 @@ export class SubredditResources {
             managerEntity,
             botEntity,
             statFrequency,
-            retention
+            retention,
+            footer = DEFAULT_FOOTER,
         } = options || {};
 
         this.managerEntity = managerEntity;
@@ -300,26 +225,12 @@ export class SubredditResources {
         this.botName = botName;
         this.delayedItems = delayedItems;
         this.cacheSettingsHash = cacheSettingsHash;
-        this.cache = cache;
         this.database = database;
         this.dispatchedActivityRepo = this.database.getRepository(DispatchedEntity);
         this.activitySourceRepo = this.database.getRepository(ActivitySourceEntity);
-        this.totalStatsRepo = this.database.getRepository(TotalStat);
-        this.tsStatsRepo = this.database.getRepository(TimeSeriesStat);
-        this.statFrequency = statFrequency;
         this.retention = retention;
-        this.prefix = prefix;
+        //this.prefix = prefix;
         this.client = client;
-        this.cacheType = cacheType;
-        this.actionedEventsMax = actionedEventsMax;
-        this.authorTTL = authorTTL === true ? 0 : authorTTL;
-        this.submissionTTL = submissionTTL === true ? 0 : submissionTTL;
-        this.commentTTL = commentTTL === true ? 0 : commentTTL;
-        this.subredditTTL = subredditTTL === true ? 0 : subredditTTL;
-        this.wikiTTL = wikiTTL === true ? 0 : wikiTTL;
-        this.filterCriteriaTTL = filterCriteriaTTL === true ? 0 : filterCriteriaTTL;
-        this.modNotesTTL = modNotesTTL === true ? 0 : modNotesTTL;
-        this.selfTTL = selfTTL === true ? 0 : selfTTL;
         this.subreddit = subreddit;
         this.thirdPartyCredentials = thirdPartyCredentials;
         this.name = name;
@@ -330,56 +241,85 @@ export class SubredditResources {
         } else {
             this.logger = logger.child({labels: ['Resources']}, mergeArr);
         }
+        this.cache = cache;
+        this.cache.setLogger(this.logger);
 
-        this.stats = {
-            cache: cacheStats(),
-            historical: createHistoricalDisplayDefaults(),
-            timeSeries: createHistoricalDisplayDefaults(),
-        };
+        this.subredditStats = new SubredditStats(database, managerEntity, cache, statFrequency, this.logger);
 
         const cacheUseCB = (miss: boolean) => {
-            this.stats.cache.userNotes.requestTimestamps.push(Date.now());
-            this.stats.cache.userNotes.requests++;
-            this.stats.cache.userNotes.miss += miss ? 1 : 0;
-        }
-        this.userNotes = new UserNotes(userNotesTTL, this.subreddit.display_name, this.client, this.logger, this.cache, cacheUseCB)
-
-        if(this.cacheType === 'memory' && this.cacheSettingsHash !== 'default') {
-            const min = Math.min(...([this.wikiTTL, this.authorTTL, this.submissionTTL, this.commentTTL, this.filterCriteriaTTL].filter(x => typeof x === 'number' && x !== 0) as number[]));
-            if(min > 0) {
-                // set default prune interval
-                this.pruneInterval = setInterval(() => {
-                    // @ts-ignore
-                    this.cache?.store.prune();
-                    this.logger.debug('Pruned cache');
-                    // prune interval should be twice the smallest TTL
-                },min * 1000 * 2)
-            }
+            this.subredditStats.incrementCacheTypeStat('userNotes', undefined, miss);
         }
 
-        if(this.retention === undefined) {
-            this.logger.verbose('Events will be stored in database indefinitely.', {leaf: 'Event Retention'});
-        } else if(typeof this.retention === 'number') {
-            this.logger.verbose(`Will retain the last ${this.retention} events in database`, {leaf: 'Event Retention'});
-        } else {
-            try {
-                const dur = parseDurationValToDuration(this.retention as DurationVal);
-                this.logger.verbose(`Will retain events processed within the last ${dur.humanize()} in database`, {leaf: 'Event Retention'});
-            } catch (e) {
-                this.retention = undefined;
-                this.logger.error(new ErrorWithCause('Could not parse retention as a valid duration. Retention enforcement is disabled.', {cause: e}));
+        this.ttl = ttl;
+        this.thirdPartyCredentials = thirdPartyCredentials;
+        this.footer = footer;
+        this.setRetention(retention, true);
+
+        this.userNotes = new UserNotes(this.ttl.userNotesTTL, this.subreddit.display_name, this.client, this.logger, this.cache, cacheUseCB)
+    }
+
+    async configure(options: SubredditResourceOptions) {
+        const {
+            ttl,
+            retention,
+            thirdPartyCredentials,
+            footer = DEFAULT_FOOTER,
+            statFrequency,
+        } = options;
+
+        this.ttl = ttl;
+        this.thirdPartyCredentials = thirdPartyCredentials;
+        this.footer = footer;
+        let forceStatInit = false;
+        if(this.subredditStats.statFrequency !== statFrequency) {
+            await this.subredditStats.destroy();
+            this.subredditStats.statFrequency = statFrequency;
+            forceStatInit = true;
+        }
+
+        if(!options.cache.equalProvider(this.cache.providerOptions)) {
+            this.cache = options.cache;
+            this.cache.setLogger(this.logger);
+            this.subredditStats = new SubredditStats(this.database, this.managerEntity, this.cache, statFrequency, this.logger);
+        }
+
+        await this.subredditStats.initStats(forceStatInit);
+        if(this.subredditStats.historicalSaveInterval === undefined) {
+            this.subredditStats.setHistoricalSaveInterval();
+        }
+        await this.initDatabaseDelayedActivities();
+        this.setRetention(retention);
+    }
+
+    setRetention(retention?: EventRetentionPolicyRange, init = false) {
+        const hashableRetention = retention ?? null;
+        const hashableExistingRetention = this.retention ?? null;
+
+        if(init || (objectHash.sha1(hashableRetention) !== objectHash.sha1(hashableExistingRetention))) {
+            this.retention = retention;
+            if(this.retention === undefined) {
+                this.logger.verbose('Events will be stored in database indefinitely.', {leaf: 'Event Retention'});
+            } else if(typeof this.retention === 'number') {
+                this.logger.verbose(`Will retain the last ${this.retention} events in database`, {leaf: 'Event Retention'});
+            } else {
+                try {
+                    const dur = parseDurationValToDuration(this.retention as DurationVal);
+                    this.logger.verbose(`Will retain events processed within the last ${dur.humanize()} in database`, {leaf: 'Event Retention'});
+                } catch (e) {
+                    this.retention = undefined;
+                    this.logger.error(new ErrorWithCause('Could not parse retention as a valid duration. Retention enforcement is disabled.', {cause: e}));
+                }
             }
         }
     }
 
     async destroy() {
-        if(this.historicalSaveInterval !== undefined) {
-            clearInterval(this.historicalSaveInterval);
-        }
-        if(this.pruneInterval !== undefined && this.cacheType === 'memory' && this.cacheSettingsHash !== 'default') {
-            clearInterval(this.pruneInterval);
-            this.cache?.reset();
-        }
+        // if(this.pruneInterval !== undefined && this.cacheType === 'memory' && this.cacheSettingsHash !== 'default') {
+        //     clearInterval(this.pruneInterval);
+        //     this.cache?.reset();
+        // }
+        await this.cache.destroy();
+        await this.subredditStats.destroy();
     }
 
     async retentionCleanup() {
@@ -522,324 +462,42 @@ export class SubredditResources {
     }
 
     async initStats() {
-        // temp migration strategy to transition from cache to db
-        try {
-            let currentStats: HistoricalStatsDisplay = createHistoricalDisplayDefaults();
-            const totalStats = await this.totalStatsRepo.findBy({managerId: this.managerEntity.id});
-            if (totalStats.length === 0) {
-                const at = await this.cache.get(`${this.name}-historical-allTime`) as null | undefined | OldHistoricalStats;
-                if (at !== null && at !== undefined) {
-                    // convert to historical stat object
-                    const rehydratedAt: any = {};
-                    for (const [k, v] of Object.entries(at)) {
-                        const t = typeof v;
-                        if (t === 'number') {
-                            // simple number stat like eventsCheckedTotal
-                            rehydratedAt[k] = v;
-                        } else if (Array.isArray(v)) {
-                            // a map stat that we have data for is serialized as an array of KV pairs
-                            const statMap = new Map(v);
-                            // @ts-ignore
-                            rehydratedAt[`${k}Total`] = Array.from(statMap.values()).reduce((acc, curr) => acc + curr, 0)
-                        } else if (v === null || v === undefined || (t === 'object' && Object.keys(v).length === 0)) {
-                            // a map stat that was not serialized (for some reason) or serialized without any data
-                            rehydratedAt[k] = 0;
-                        } else {
-                            // ???? shouldn't get here
-                            this.logger.warn(`Did not recognize rehydrated historical stat "${k}" of type ${t}`);
-                            rehydratedAt[k] = v;
-                        }
-                    }
-                    currentStats = rehydratedAt as HistoricalStatsDisplay;
-                }
-                const now = dayjs();
-                const statEntities: TotalStat[] = [];
-                for (const [k, v] of Object.entries(currentStats)) {
-                    statEntities.push(new TotalStat({
-                        metric: k,
-                        value: v,
-                        manager: this.managerEntity,
-                        createdAt: now,
-                    }));
-                }
-                await this.totalStatsRepo.save(statEntities);
-                this.totalStatsEntities = statEntities;
-            } else {
-                this.totalStatsEntities = totalStats;
-                for (const [k, v] of Object.entries(currentStats)) {
-                    const matchedStat = totalStats.find(x => x.metric === k);
-                    if (matchedStat !== undefined) {
-                        currentStats[k] = matchedStat.value;
-                    } else {
-                        this.logger.warn(`Could not find historical stat matching '${k}' in the database, will default to 0`);
-                        currentStats[k] = v;
-                    }
-                }
-            }
-            this.stats.historical = currentStats;
-        } catch (e) {
-            this.logger.error(new ErrorWithCause('Failed to init historical stats', {cause: e}));
-        }
-
-        try {
-            if(this.statFrequency !== false) {
-                let currentStats: HistoricalStatsDisplay = createHistoricalDisplayDefaults();
-                let startRange = dayjs().set('second', 0);
-                for(const unit of statFrequencies) {
-                    if(unit !== 'week' && !frequencyEqualOrLargerThanMin(unit, this.statFrequency)) {
-                        startRange = startRange.set(unit, 0);
-                    }
-                    if(unit === 'week' && this.statFrequency === 'week') {
-                        // make sure we get beginning of week
-                        startRange = startRange.week(startRange.week());
-                    }
-                }
-                // set end range by +1 of whatever unit we are using
-                const endRange = this.statFrequency === 'week' ? startRange.clone().week(startRange.week() + 1) : startRange.clone().set(this.statFrequency, startRange.get(this.statFrequency) + 1);
-
-                const tsStats = await this.tsStatsRepo.findBy({
-                    managerId: this.managerEntity.id,
-                    granularity: this.statFrequency,
-                    // make sure its inclusive!
-                    _createdAt: Between(startRange.clone().subtract(1, 'second').toDate(), endRange.clone().add(1, 'second').toDate())
-                });
-
-                if(tsStats.length === 0) {
-                    const statEntities: TimeSeriesStat[] = [];
-                    for (const [k, v] of Object.entries(currentStats)) {
-                        statEntities.push(new TimeSeriesStat({
-                            metric: k,
-                            value: v,
-                            granularity: this.statFrequency,
-                            manager: this.managerEntity,
-                            createdAt: startRange,
-                        }));
-                    }
-                    this.timeSeriesStatsEntities = statEntities;
-                } else {
-                    this.timeSeriesStatsEntities = tsStats;
-                }
-
-                for (const [k, v] of Object.entries(currentStats)) {
-                    const matchedStat = this.timeSeriesStatsEntities.find(x => x.metric === k);
-                    if (matchedStat !== undefined) {
-                        currentStats[k] = matchedStat.value;
-                    } else {
-                        this.logger.warn(`Could not find time series stat matching '${k}' in the database, will default to 0`);
-                        currentStats[k] = v;
-                    }
-                }
-            }
-        } catch (e) {
-            this.logger.error(new ErrorWithCause('Failed to init frequency (time series) stats', {cause: e}));
-        }
+        return this.subredditStats.initStats();
     }
 
     updateHistoricalStats(data: Partial<HistoricalStatsDisplay>) {
-        for(const [k, v] of Object.entries(data)) {
-            if(this.stats.historical[k] !== undefined && v !== undefined) {
-                this.stats.historical[k] += v;
-            }
-            if(this.stats.timeSeries[k] !== undefined && v !== undefined) {
-                this.stats.timeSeries[k] += v;
-            }
-        }
+        this.subredditStats.updateHistoricalStats(data);
     }
 
     getHistoricalDisplayStats(): HistoricalStatsDisplay {
-        return this.stats.historical;
-    }
-
-    async saveHistoricalStats() {
-        if(this.totalStatsEntities !== undefined) {
-            for(const [k, v] of Object.entries(this.stats.historical)) {
-                const matchedStatIndex = this.totalStatsEntities.findIndex(x => x.metric === k);
-                if(matchedStatIndex !== -1) {
-                    this.totalStatsEntities[matchedStatIndex].value = v;
-                } else {
-                    this.logger.warn(`Could not find historical stat matching '${k}' in total stats??`);
-                }
-
-            }
-            await this.totalStatsRepo.save(this.totalStatsEntities);
-        }
-
-        if(this.timeSeriesStatsEntities !== undefined) {
-            for(const [k, v] of Object.entries(this.stats.timeSeries)) {
-                const matchedStatIndex = this.timeSeriesStatsEntities.findIndex(x => x.metric === k);
-                if(matchedStatIndex !== -1) {
-                    this.timeSeriesStatsEntities[matchedStatIndex].value = v;
-                } else {
-                    this.logger.warn(`Could not find time series stat matching '${k}' in total stats??`);
-                }
-
-            }
-            await this.tsStatsRepo.save(this.timeSeriesStatsEntities);
-        }
+        return this.subredditStats.getHistoricalDisplayStats();
     }
 
     setHistoricalSaveInterval() {
-        this.historicalSaveInterval = setInterval((function(self) {
-            return async () => {
-                await self.saveHistoricalStats();
-            }
-        })(this),10000);
+        this.subredditStats.setHistoricalSaveInterval();
     }
 
     async getCacheKeyCount() {
-        if (this.cache.store.keys !== undefined) {
-            if(this.cacheType === 'redis') {
-                const keys = await this.cache.store.keys(`${this.prefix}*`);
-                return keys.length;
-            }
-            return (await this.cache.store.keys()).length;
-        }
-        return 0;
-    }
-
-    async interactWithCacheByKeyPattern(pattern: string | RegExp, action: 'get' | 'delete') {
-        let patternIsReg = pattern instanceof RegExp;
-        let regPattern: RegExp;
-        let globPattern = pattern;
-
-        const cacheDict: Record<string, any> = {};
-
-        if (typeof pattern === 'string') {
-            const possibleRegPattern = parseStringToRegex(pattern, 'ig');
-            if (possibleRegPattern !== undefined) {
-                regPattern = possibleRegPattern;
-                patternIsReg = true;
-            } else {
-                if (this.prefix !== undefined && !pattern.includes(this.prefix)) {
-                    // need to add wildcard to beginning of pattern so that the regex will still match a key with a prefix
-                    globPattern = `${this.prefix}${pattern}`;
-                }
-                // @ts-ignore
-                const result = globrex(globPattern, {flags: 'i'});
-                regPattern = result.regex;
-            }
-        } else {
-            regPattern = pattern;
-        }
-
-        if (this.cacheType === 'redis') {
-            // @ts-ignore
-            const redisClient = this.cache.store.getClient();
-            if (patternIsReg) {
-                // scan all and test key by regex
-                for await (const key of redisClient.scanIterator()) {
-                    if (regPattern.test(key) && (this.prefix === undefined || key.includes(this.prefix))) {
-                        if (action === 'delete') {
-                            await redisClient.del(key)
-                        } else {
-                            cacheDict[key] = await redisClient.get(key);
-                        }
-                    }
-                }
-            } else {
-                // not a regex means we can use glob pattern (more efficient!)
-                for await (const key of redisScanIterator(redisClient, { MATCH: globPattern })) {
-                    if (action === 'delete') {
-                        await redisClient.del(key)
-                    } else {
-                        cacheDict[key] = await redisClient.get(key);
-                    }
-                }
-            }
-        } else if (this.cache.store.keys !== undefined) {
-            for (const key of await this.cache.store.keys()) {
-                if (regPattern.test(key) && (this.prefix === undefined || key.includes(this.prefix))) {
-                    if (action === 'delete') {
-                        await this.cache.del(key)
-                    } else {
-                        cacheDict[key] = await this.cache.get(key);
-                    }
-                }
-            }
-        }
-        return cacheDict;
-    }
-
-    async deleteCacheByKeyPattern(pattern: string | RegExp) {
-        return await this.interactWithCacheByKeyPattern(pattern, 'delete');
-    }
-
-    async getCacheByKeyPattern(pattern: string | RegExp) {
-        return await this.interactWithCacheByKeyPattern(pattern, 'get');
+       return this.cache.getCacheKeyCount();
     }
 
     async resetCacheForItem(item: Comment | Submission | RedditUser) {
         if (asActivity(item)) {
-            if (this.filterCriteriaTTL !== false) {
-                await this.deleteCacheByKeyPattern(`itemCrit-${item.name}*`);
+            if (this.ttl.filterCriteriaTTL !== false) {
+                await this.cache.deleteCacheByKeyPattern(`itemCrit-${item.name}*`);
             }
             await this.setActivity(item, false);
-        } else if (isUser(item) && this.filterCriteriaTTL !== false) {
-            await this.deleteCacheByKeyPattern(`authorCrit-*-${getActivityAuthorName(item)}*`);
+        } else if (isUser(item) && this.ttl.filterCriteriaTTL !== false) {
+            await this.cache.deleteCacheByKeyPattern(`authorCrit-*-${getActivityAuthorName(item)}*`);
         }
     }
 
     getCacheTotals() {
-        return Object.values(this.stats.cache).reduce((acc, curr) => ({
-            miss: acc.miss + curr.miss,
-            req: acc.req + curr.requests,
-        }), {miss: 0, req: 0});
+        return this.subredditStats.getCacheTotals();
     }
 
     async getStats() {
-        const totals = this.getCacheTotals();
-        const cacheKeys = Object.keys(this.stats.cache);
-        const res = {
-            cache: {
-                // TODO could probably combine these two
-                totalRequests: totals.req,
-                totalMiss: totals.miss,
-                missPercent: `${formatNumber(totals.miss === 0 || totals.req === 0 ? 0 :(totals.miss/totals.req) * 100, {toFixed: 0})}%`,
-                types: await cacheKeys.reduce(async (accProm, curr) => {
-                    const acc = await accProm;
-                    // calculate miss percent
-
-                    const per = acc[curr].miss === 0 ? 0 : formatNumber(acc[curr].miss / acc[curr].requests) * 100;
-                    acc[curr].missPercent = `${formatNumber(per, {toFixed: 0})}%`;
-
-                    // calculate average identifier hits
-
-                    const idCache = acc[curr].identifierRequestCount;
-                    // @ts-expect-error
-                    const idKeys = await idCache.store.keys() as string[];
-                    if(idKeys.length > 0) {
-                        let hits = 0;
-                        for (const k of idKeys) {
-                            hits += await idCache.get(k) as number;
-                        }
-                        acc[curr].identifierAverageHit = formatNumber(hits/idKeys.length);
-                    }
-
-                    if(acc[curr].requestTimestamps.length > 1) {
-                        // calculate average time between request
-                        const diffData = acc[curr].requestTimestamps.reduce((accTimestampData, curr: number) => {
-                            if(accTimestampData.last === 0) {
-                                accTimestampData.last = curr;
-                                return accTimestampData;
-                            }
-                            accTimestampData.diffs.push(curr - accTimestampData.last);
-                            accTimestampData.last = curr;
-                            return accTimestampData;
-                        },{last: 0, diffs: [] as number[]});
-                        const avgDiff = diffData.diffs.reduce((acc, curr) => acc + curr, 0) / diffData.diffs.length;
-
-                        acc[curr].averageTimeBetweenHits = formatNumber(avgDiff/1000);
-                    }
-
-                    const {requestTimestamps, identifierRequestCount, ...rest} = acc[curr];
-                    // @ts-ignore
-                    acc[curr] = rest;
-
-                    return acc;
-                }, Promise.resolve({...this.stats.cache}))
-            }
-        }
-        return res;
+        return this.subredditStats.getCacheStatsForManager();
     }
 
     setLogger(logger: Logger) {
@@ -927,7 +585,7 @@ export class SubredditResources {
     // }
 
     async getActivityLastSeenDate(value: SnoowrapActivity | string): Promise<Dayjs | undefined> {
-        if(this.selfTTL !== false) {
+        if(this.ttl.selfTTL !== false) {
             const id = typeof(value) === 'string' ? value : value.name;
             const hash = `activityLastSeen-${id}`;
             const lastSeenUnix = await this.cache.get(hash) as string | undefined | null;
@@ -940,7 +598,7 @@ export class SubredditResources {
     }
 
     async setActivityLastSeenDate(value: SnoowrapActivity | string, timestamp?: number): Promise<void> {
-        if(this.selfTTL !== false) {
+        if(this.ttl.selfTTL !== false) {
             const id = typeof(value) === 'string' ? value : value.name;
             const hash = `activityLastSeen-${id}`;
             this.cache.set(hash, timestamp ?? dayjs().unix(), {
@@ -952,29 +610,25 @@ export class SubredditResources {
     async getActivity(item: Submission | Comment) {
         try {
             let hash = '';
-            if (this.submissionTTL !== false && asSubmission(item)) {
+            if (this.ttl.submissionTTL !== false && asSubmission(item)) {
                 hash = `sub-${item.name}`;
-                await this.stats.cache.submission.identifierRequestCount.set(hash, (await this.stats.cache.submission.identifierRequestCount.wrap(hash, () => 0) as number) + 1);
-                this.stats.cache.submission.requestTimestamps.push(Date.now());
-                this.stats.cache.submission.requests++;
                 const cachedSubmission = await this.cache.get(hash);
                 if (cachedSubmission !== undefined && cachedSubmission !== null) {
+                    await this.subredditStats.incrementCacheTypeStat('submission', hash, false);
                     this.logger.debug(`Cache Hit: Submission ${item.name}`);
                     return cachedSubmission;
                 }
-                this.stats.cache.submission.miss++;
+                await this.subredditStats.incrementCacheTypeStat('submission', hash, true);
                 return await this.setActivity(item);
-            } else if (this.commentTTL !== false) {
+            } else if (this.ttl.commentTTL !== false) {
                 hash = `comm-${item.name}`;
-                await this.stats.cache.comment.identifierRequestCount.set(hash, (await this.stats.cache.comment.identifierRequestCount.wrap(hash, () => 0) as number) + 1);
-                this.stats.cache.comment.requestTimestamps.push(Date.now());
-                this.stats.cache.comment.requests++;
                 const cachedComment = await this.cache.get(hash);
                 if (cachedComment !== undefined && cachedComment !== null) {
                     this.logger.debug(`Cache Hit: Comment ${item.name}`);
+                    await this.subredditStats.incrementCacheTypeStat('comment', hash, false);
                     return cachedComment;
                 }
-                this.stats.cache.comment.miss++;
+                await this.subredditStats.incrementCacheTypeStat('comment', hash, true);
                 return this.setActivity(item);
             } else {
                 // @ts-ignore
@@ -990,34 +644,38 @@ export class SubredditResources {
     {
         try {
             let hash = '';
-            if (this.submissionTTL !== false && isSubmission(item)) {
+            if (this.ttl.submissionTTL !== false && isSubmission(item)) {
                 hash = `sub-${item.name}`;
                 if (tryToFetch && item instanceof Submission) {
                     // @ts-ignore
-                    const itemToCache = await item.fetch();
-                    await this.cache.set(hash, itemToCache, {ttl: this.submissionTTL});
+                    const itemToCache = await item.refresh();
+                    await this.cache.set(hash, itemToCache, {ttl: this.ttl.submissionTTL});
                     return itemToCache;
                 } else {
                     // @ts-ignore
-                    await this.cache.set(hash, item, {ttl: this.submissionTTL});
+                    await this.cache.set(hash, item, {ttl: this.ttl.submissionTTL});
                     return item;
                 }
-            } else if (this.commentTTL !== false) {
+            } else if (this.ttl.commentTTL !== false) {
                 hash = `comm-${item.name}`;
                 if (tryToFetch && item instanceof Comment) {
                     // @ts-ignore
-                    const itemToCache = await item.fetch();
-                    await this.cache.set(hash, itemToCache, {ttl: this.commentTTL});
+                    const itemToCache = await item.refresh();
+                    await this.cache.set(hash, itemToCache, {ttl: this.ttl.commentTTL});
                     return itemToCache;
                 } else {
                     // @ts-ignore
-                    await this.cache.set(hash, item, {ttl: this.commentTTL});
+                    await this.cache.set(hash, item, {ttl: this.ttl.commentTTL});
                     return item;
                 }
             }
             return item;
-        } catch (e) {
-            throw new ErrorWithCause('Error occurred while trying to add Activity to cache', {cause: e});
+        } catch (e: any) {
+            if(e.message !== undefined && e.message.includes('Cannot read properties of undefined (reading \'constructor\')')) {
+                throw new ErrorWithCause('Error occurred while trying to add Activity to cache (Comment likely does not exist)', {cause: e});
+            } else {
+                throw new ErrorWithCause('Error occurred while trying to add Activity to cache', {cause: e});
+            }
         }
     }
 
@@ -1038,10 +696,10 @@ export class SubredditResources {
     }
 
     async setRecentSelf(item: Submission | Comment) {
-        if(this.selfTTL !== false) {
+        if(this.ttl.selfTTL !== false) {
             const hash = asSubmission(item) ? `sub-recentSelf-${item.name}` : `comm-recentSelf-${item.name}`;
             // @ts-ignore
-            await this.cache.set(hash, item, {ttl: this.selfTTL});
+            await this.cache.set(hash, item, {ttl: this.ttl.selfTTL});
         }
         return;
     }
@@ -1077,22 +735,23 @@ export class SubredditResources {
         }
         try {
             let hash = '';
-            if (this.subredditTTL !== false) {
+            if (this.ttl.subredditTTL !== false) {
 
                 hash = `sub-${subName}`;
-                await this.stats.cache.subreddit.identifierRequestCount.set(hash, (await this.stats.cache.subreddit.identifierRequestCount.wrap(hash, () => 0) as number) + 1);
-                this.stats.cache.subreddit.requestTimestamps.push(Date.now());
-                this.stats.cache.subreddit.requests++;
-                const cachedSubreddit = await this.cache.get(hash);
+                const cachedSubreddit = await this.cache.get(hash) as Subreddit | SubredditLike | null | undefined;
                 if (cachedSubreddit !== undefined && cachedSubreddit !== null) {
                     logger.debug(`Cache Hit: Subreddit ${subName}`);
+                    await this.subredditStats.incrementCacheTypeStat('subreddit', hash, false);
+                    if(cachedSubreddit instanceof Subreddit) {
+                        return cachedSubreddit;
+                    }
                     return new Subreddit(cachedSubreddit, this.client, false);
                 }
+                await this.subredditStats.incrementCacheTypeStat('subreddit', hash, true);
                 // @ts-ignore
                 const subreddit = await (item instanceof Subreddit ? item : this.client.getSubreddit(subName)).fetch() as Subreddit;
-                this.stats.cache.subreddit.miss++;
                 // @ts-ignore
-                await this.cache.set(hash, subreddit, {ttl: this.subredditTTL});
+                await this.cache.set(hash, subreddit, {ttl: this.ttl.subredditTTL});
                 // @ts-ignore
                 return subreddit as Subreddit;
             } else {
@@ -1102,8 +761,9 @@ export class SubredditResources {
                 return subreddit as Subreddit;
             }
         } catch (err: any) {
-            this.logger.error('Error while trying to fetch a cached subreddit', err);
-            throw err.logged;
+            const cmError = new CMError('Error while trying to fetch a cached subreddit', {cause: err, logged: true});
+            this.logger.error(cmError);
+            throw cmError;
         }
     }
 
@@ -1111,7 +771,7 @@ export class SubredditResources {
         const subredditVal = rawSubredditVal ?? this.subreddit;
         const subName = typeof subredditVal === 'string' ? subredditVal : subredditVal.display_name;
         const hash = `sub-${subName}-moderators`;
-        if (this.subredditTTL !== false) {
+        if (this.ttl.subredditTTL !== false) {
             const cachedSubredditMods = await this.cache.get(hash);
             if (cachedSubredditMods !== undefined && cachedSubredditMods !== null) {
                 this.logger.debug(`Cache Hit: Subreddit Moderators ${subName}`);
@@ -1127,18 +787,30 @@ export class SubredditResources {
         }
         const mods = await sub.getModerators();
 
-        if (this.subredditTTL !== false) {
+        if (this.ttl.subredditTTL !== false) {
             // @ts-ignore
-            await this.cache.set(hash, mods.map(x => x.name), {ttl: this.subredditTTL});
+            await this.cache.set(hash, mods.map(x => x.name), {ttl: this.ttl.subredditTTL});
         }
 
         return mods;
     }
 
+    async getSubredditModeratorPermissions(rawUserVal: RedditUser | string, rawSubredditVal?: Subreddit | string): Promise<string[]> {
+        const mods = await this.getSubredditModerators(rawSubredditVal);
+        const user = rawUserVal instanceof RedditUser ? rawUserVal.name : rawUserVal;
+
+        const mod = mods.find(x => x.name.toLowerCase() === user.toLowerCase());
+        if(mod === undefined) {
+            return [];
+        }
+        // @ts-ignore
+        return mod.mod_permissions as string[];
+    }
+
     async getSubredditContributors(): Promise<RedditUser[]> {
         const subName = this.subreddit.display_name;
         const hash = `sub-${subName}-contributors`;
-        if (this.subredditTTL !== false) {
+        if (this.ttl.subredditTTL !== false) {
             const cachedSubredditMods = await this.cache.get(hash);
             if (cachedSubredditMods !== undefined && cachedSubredditMods !== null) {
                 this.logger.debug(`Cache Hit: Subreddit Contributors ${subName}`);
@@ -1151,9 +823,9 @@ export class SubredditResources {
             contributors = await contributors.fetchMore({amount: 100});
         }
 
-        if (this.subredditTTL !== false) {
+        if (this.ttl.subredditTTL !== false) {
             // @ts-ignore
-            await this.cache.set(hash, contributors.map(x => x.name), {ttl: this.subredditTTL});
+            await this.cache.set(hash, contributors.map(x => x.name), {ttl: this.ttl.subredditTTL});
         }
 
         return contributors.map(x => new RedditUser({name: x.name}, this.client, false));
@@ -1162,13 +834,13 @@ export class SubredditResources {
     async addUserToSubredditContributorsCache(user: RedditUser) {
         const subName = this.subreddit.display_name;
         const hash = `sub-${subName}-contributors`;
-        if (this.subredditTTL !== false) {
+        if (this.ttl.subredditTTL !== false) {
             const cachedVal = await this.cache.get(hash);
             if (cachedVal !== undefined && cachedVal !== null) {
                 const cacheContributors = cachedVal as string[];
                 if(!cacheContributors.includes(user.name)) {
                     cacheContributors.push(user.name);
-                    await this.cache.set(hash, cacheContributors, {ttl: this.subredditTTL});
+                    await this.cache.set(hash, cacheContributors, {ttl: this.ttl.subredditTTL});
                 }
             }
         }
@@ -1177,27 +849,22 @@ export class SubredditResources {
     async removeUserFromSubredditContributorsCache(user: RedditUser) {
         const subName = this.subreddit.display_name;
         const hash = `sub-${subName}-contributors`;
-        if (this.subredditTTL !== false) {
+        if (this.ttl.subredditTTL !== false) {
             const cachedVal = await this.cache.get(hash);
             if (cachedVal !== undefined && cachedVal !== null) {
                 const cacheContributors = cachedVal as string[];
                 if(cacheContributors.includes(user.name)) {
-                    await this.cache.set(hash, cacheContributors.filter(x => x !== user.name), {ttl: this.subredditTTL});
+                    await this.cache.set(hash, cacheContributors.filter(x => x !== user.name), {ttl: this.ttl.subredditTTL});
                 }
             }
         }
     }
 
     async hasSubreddit(name: string) {
-        if (this.subredditTTL !== false) {
+        if (this.ttl.subredditTTL !== false) {
             const hash = `sub-${name}`;
-            this.stats.cache.subreddit.requests++
-            this.stats.cache.subreddit.requestTimestamps.push(Date.now());
-            await this.stats.cache.subreddit.identifierRequestCount.set(hash, (await this.stats.cache.subreddit.identifierRequestCount.wrap(hash, () => 0) as number) + 1);
             const val = await this.cache.get(hash);
-            if(val === undefined || val === null) {
-                this.stats.cache.subreddit.miss++;
-            }
+            await this.subredditStats.incrementCacheTypeStat('subreddit', hash, val === undefined || val === null);
             return val !== undefined && val !== null;
         }
         return false;
@@ -1221,12 +888,14 @@ export class SubredditResources {
 
         const hash = `authorModNotes-${subredditName}-${authorName}`;
 
-        if (this.modNotesTTL !== false) {
-            const cachedModNoteData = await this.cache.get(hash) as ModNoteRaw[] | null | undefined;
+        if (this.ttl.modNotesTTL !== false) {
+            const cachedModNoteData = await this.cache.get(hash) as ModNoteRaw[] | ModNote[] | null | undefined;
             if (cachedModNoteData !== undefined && cachedModNoteData !== null) {
                 this.logger.debug(`Cache Hit: Author ModNotes ${authorName} in ${subredditName}`);
-
                 return cachedModNoteData.map(x => {
+                    if(x instanceof ModNote) {
+                        return x;
+                    }
                     const note = new ModNote(x, this.client);
                     note.subreddit = this.subreddit;
                     if (val instanceof RedditUser) {
@@ -1245,9 +914,9 @@ export class SubredditResources {
             return x;
         });
 
-        if (this.modNotesTTL !== false) {
+        if (this.ttl.modNotesTTL !== false) {
             // @ts-ignore
-            await this.cache.set(hash, fetchedNotes, {ttl: this.modNotesTTL});
+            await this.cache.set(hash, fetchedNotes, {ttl: this.ttl.modNotesTTL});
         }
 
         return fetchedNotes;
@@ -1269,12 +938,12 @@ export class SubredditResources {
 
         const newNote = await this.client.addModNote(data);
 
-        if (this.modNotesTTL !== false) {
+        if (this.ttl.modNotesTTL !== false) {
             const hash = `authorModNotes-${this.subreddit.display_name}-${data.user.name}`;
-            const cachedModNoteData = await this.cache.get(hash) as ModNoteRaw[] | null | undefined;
+            const cachedModNoteData = await this.cache.get(hash) as ModNoteRaw[] | ModNote[] | null | undefined;
             if (cachedModNoteData !== undefined && cachedModNoteData !== null) {
                 this.logger.debug(`Adding new Note ${newNote.id} to Author ${data.user.name} Note cache`);
-                await this.cache.set(hash, [newNote, ...cachedModNoteData], {ttl: this.modNotesTTL});
+                await this.cache.set(hash, [newNote, ...cachedModNoteData], {ttl: this.ttl.modNotesTTL});
             }
         }
 
@@ -1288,10 +957,13 @@ export class SubredditResources {
             throw new SimpleError(`User is '[deleted]', cannot retrieve`, {isSerious: false});
         }
         const hash = `author-${authorName}`;
-        if (this.authorTTL !== false) {
-            const cachedAuthorData = await this.cache.get(hash);
+        if (this.ttl.authorTTL !== false) {
+            const cachedAuthorData = await this.cache.get(hash) as RedditUser | RedditUserLike | null | undefined;
             if (cachedAuthorData !== undefined && cachedAuthorData !== null) {
                 this.logger.debug(`Cache Hit: Author ${authorName}`);
+                if(cachedAuthorData instanceof RedditUser) {
+                    return cachedAuthorData;
+                }
                 const {subreddit, ...rest} = cachedAuthorData as any;
                 const snoowrapConformedData = {...rest};
                 if(subreddit !== null) {
@@ -1315,9 +987,9 @@ export class SubredditResources {
             // @ts-ignore
             user = await user.fetch();
 
-            if (this.authorTTL !== false) {
+            if (this.ttl.authorTTL !== false) {
                 // @ts-ignore
-                await this.cache.set(hash, user, {ttl: this.authorTTL});
+                await this.cache.set(hash, user, {ttl: this.ttl.authorTTL});
             }
 
             return user;
@@ -1401,20 +1073,17 @@ export class SubredditResources {
             const hash = objectHash.sha1(hashObj);
             const cacheKey = `${userName}-${listingData.name}-${hash}`;
 
-            if (this.authorTTL !== false) {
+            if (this.ttl.authorTTL !== false) {
                 if (this.useSubredditAuthorCache) {
                     hashObj.subreddit = this.subreddit;
                 }
 
-                this.stats.cache.author.requests++;
-                await this.stats.cache.author.identifierRequestCount.set(userName, (await this.stats.cache.author.identifierRequestCount.wrap(userName, () => 0) as number) + 1);
-                this.stats.cache.author.requestTimestamps.push(Date.now());
-
                 const cacheVal = await this.cache.get(cacheKey);
 
                 if(cacheVal === undefined || cacheVal === null) {
-                    this.stats.cache.author.miss++;
+                    await this.subredditStats.incrementCacheTypeStat('author', userName, true);
                 } else {
+                    await this.subredditStats.incrementCacheTypeStat('author', userName, false);
                     fromCache = true;
                     const {
                         pre: cachedPre,
@@ -1429,9 +1098,14 @@ export class SubredditResources {
 
                     // convert cached activities into snoowrap activities
                     pre = cachedPre.map(x => {
+                        // if cache from memory then activities are still full-fat activities which we can return immediately
+                        if(x instanceof Comment || x instanceof Submission) {
+                            return x;
+                        }
+                        // otherwise we need to reconstruct the objects from json-serialized data
                         const { author: authorName, subreddit: subredditName, ...rest } = x;
-                        const author = new RedditUser({name: authorName }, this.client, false);
-                        const subreddit = new Subreddit({display_name: subredditName as unknown as string}, this.client, false);
+                        const author = new RedditUser({name: getActivityAuthorName(authorName) }, this.client, false);
+                        const subreddit = new Subreddit({display_name: getActivitySubredditName(x)}, this.client, false);
                         if(asSubmission(x)) {
                             const {comments, ...restSub} = rest as Submission;
                             const subData = {...restSub, author, subreddit};
@@ -1597,8 +1271,8 @@ export class SubredditResources {
 
                 rawCount = unFilteredItems !== undefined ? unFilteredItems.length : listing.length;
 
-                if(this.authorTTL !== false) {
-                    this.cache.set(cacheKey, {pre: pre, rawCount, apiCount, preMaxTrigger}, {ttl: this.authorTTL})
+                if(this.ttl.authorTTL !== false) {
+                    this.cache.set(cacheKey, {pre: pre, rawCount, apiCount, preMaxTrigger}, {ttl: this.ttl.authorTTL})
                 }
             }
 
@@ -1679,83 +1353,108 @@ export class SubredditResources {
         return filteredListing;
     }
 
-    async getExternalResource(val: string, subredditArg?: Subreddit): Promise<{val: string, fromCache: boolean, response?: Response, hash?: string}> {
-        const subreddit = subredditArg || this.subreddit;
-        let cacheKey;
-        const wikiContext = parseWikiContext(val);
-        if (wikiContext !== undefined) {
-            cacheKey = `${subreddit.display_name}-content-${wikiContext.wiki}${wikiContext.subreddit !== undefined ? `|${wikiContext.subreddit}` : ''}`;
+    async getExternalResource(val: string, options: ExternalResourceOptions = {}): Promise<{ val: string, fromCache: boolean, response?: Response, hash?: string, subreddit?: string }> {
+        const {defaultTo} = options;
+        let wikiContext = parseWikiContext(val);
+
+        let extUrl = wikiContext === undefined ? parseExternalUrl(val) : undefined;
+
+        if (extUrl === undefined && wikiContext === undefined) {
+            if (defaultTo === 'url') {
+                extUrl = val;
+            } else if (defaultTo === 'wiki') {
+                wikiContext = {wiki: val};
+            }
         }
-        const extUrl = wikiContext === undefined ? parseExternalUrl(val) : undefined;
+
+        if (wikiContext !== undefined) {
+            const res = await this.getWikiPage(wikiContext, options);
+            return {...res, subreddit: wikiContext.subreddit ?? this.subreddit.display_name};
+        }
         if (extUrl !== undefined) {
-            cacheKey = extUrl;
+            return await this.getCachedUrlResult(extUrl, options);
         }
 
-        if (cacheKey === undefined) {
-            return {val, fromCache: false, hash: cacheKey};
-        }
-
-        // try to get cached value first
-        if (this.wikiTTL !== false) {
-            await this.stats.cache.content.identifierRequestCount.set(cacheKey, (await this.stats.cache.content.identifierRequestCount.wrap(cacheKey, () => 0) as number) + 1);
-            this.stats.cache.content.requestTimestamps.push(Date.now());
-            this.stats.cache.content.requests++;
-            const cachedContent = await this.cache.get(cacheKey);
-            if (cachedContent !== undefined && cachedContent !== null) {
-                this.logger.debug(`Content Cache Hit: ${cacheKey}`);
-                return {val: cachedContent as string, fromCache: true, hash: cacheKey};
-            } else {
-                this.stats.cache.content.miss++;
-            }
-        }
-
-        let wikiContent: string;
-        let response: Response | undefined;
-
-        // no cache hit, get from source
-        if (wikiContext !== undefined) {
-            let sub;
-            if (wikiContext.subreddit === undefined || wikiContext.subreddit.toLowerCase() === subreddit.display_name) {
-                sub = subreddit;
-            } else {
-                sub = this.client.getSubreddit(wikiContext.subreddit);
-            }
-            try {
-                // @ts-ignore
-                const wikiPage = sub.getWikiPage(wikiContext.wiki);
-                wikiContent = await wikiPage.content_md;
-            } catch (err: any) {
-                let msg = `Could not read wiki page for an unknown reason. Please ensure the page 'https://reddit.com${sub.display_name_prefixed}/wiki/${wikiContext.wiki}' exists and is readable`;
-                if(err.statusCode !== undefined) {
-                    if(err.statusCode === 404) {
-                        msg = `Could not find a wiki page at https://reddit.com${sub.display_name_prefixed}/wiki/${wikiContext.wiki} -- Reddit returned a 404`;
-                    } else if(err.statusCode === 403 || err.statusCode === 401) {
-                        msg = `Bot either does not have permission visibility permissions for the wiki page at https://reddit.com${sub.display_name_prefixed}wiki/${wikiContext.wiki} (due to subreddit restrictions) or the bot does have have oauth permissions to read wiki pages (operator error). Reddit returned a ${err.statusCode}`;
-                    }
-                }
-                this.logger.error(msg, err);
-                throw new LoggedError(msg);
-            }
-        } else {
-            try {
-                const [wikiContentVal, responseVal] = await fetchExternalResult(extUrl as string, this.logger);
-                wikiContent = wikiContentVal;
-                response = responseVal;
-            } catch (err: any) {
-                const msg = `Error occurred while trying to fetch the url ${extUrl}`;
-                this.logger.error(msg, err);
-                throw new LoggedError(msg);
-            }
-        }
-
-        return {val: wikiContent, fromCache: false, response, hash: cacheKey};
+        return {val, fromCache: false};
     }
 
-    async getContent(val: string, subredditArg?: Subreddit): Promise<string> {
-        const {val: wikiContent, fromCache, hash} = await this.getExternalResource(val, subredditArg);
+    async getCachedUrlResult(extUrl: string, options: ExternalResourceOptions = {}): Promise<{ val: string, fromCache: boolean, response?: Response, hash?: string }> {
+        const cacheKey = extUrl;
+        const {force = false, shared = false} = options;
 
-        if (!fromCache && hash !== undefined && this.wikiTTL !== false) {
-            this.cache.set(hash, wikiContent, {ttl: this.wikiTTL});
+        // try to get cached value first
+        if (!force && this.ttl.wikiTTL !== false) {
+            const cachedContent = await this.cache.get(cacheKey, shared);
+            if (cachedContent !== undefined && cachedContent !== null) {
+                this.logger.debug(`Content Cache Hit: ${cacheKey}`);
+                await this.subredditStats.incrementCacheTypeStat('content', cacheKey, false);
+                return {val: cachedContent as string, fromCache: true, hash: cacheKey};
+            } else {
+                await this.subredditStats.incrementCacheTypeStat('content', cacheKey, true);
+            }
+        }
+
+        try {
+            const [wikiContentVal, responseVal] = await fetchExternalResult(extUrl as string, this.logger);
+            return {val: wikiContentVal, fromCache: false, response: responseVal, hash: cacheKey};
+        } catch (err: any) {
+            throw new CMError(`Error occurred while trying to fetch the url ${extUrl}`, {cause: err});
+        }
+    }
+
+    async getWikiPage(data: WikiContext, options: ExternalResourceOptions = {}): Promise<{ val: string, fromCache: boolean, response?: Response, hash?: string, subreddit?: string, wikiPage?: WikiPage}> {
+        const {subreddit: subredditArg, force = false, shared = false } = options;
+        const {
+            subreddit = subredditArg !== undefined ? subredditArg.display_name : this.subreddit.display_name,
+            wiki
+        } = data;
+
+        const cacheKey = `${subreddit}-content-${wiki}${data.subreddit !== undefined ? `|${data.subreddit}` : ''}`;
+
+        if (!force && this.ttl.wikiTTL !== false) {
+            const cachedContent = await this.cache.get(cacheKey, shared);
+            if (cachedContent !== undefined && cachedContent !== null) {
+                this.logger.debug(`Content Cache Hit: ${cacheKey}`);
+                await this.subredditStats.incrementCacheTypeStat('content', cacheKey, false);
+                return {val: cachedContent as string, fromCache: true, hash: cacheKey};
+            } else {
+                await this.subredditStats.incrementCacheTypeStat('content', cacheKey, true);
+            }
+        }
+
+        let sub = this.client.getSubreddit(subreddit);
+
+        try {
+            // @ts-ignore
+            const wikiPage = await sub.getWikiPage(wiki).fetch();
+            const wikiContent = wikiPage.content_md;
+            return {val: wikiContent, fromCache: false, hash: cacheKey, wikiPage};
+        } catch (err: any) {
+            if (isStatusError(err)) {
+                const error = err.statusCode === 404 ? 'does not exist' : 'is not accessible';
+                let reasons = [];
+                if (!this.client.scope.includes('wikiread')) {
+                    reasons.push(`Bot does not have 'wikiread' oauth permission`);
+                } else {
+                    const modPermissions = await this.getSubredditModeratorPermissions(this.botName, subreddit);
+                    if (!modPermissions.includes('all') && !modPermissions.includes('wiki')) {
+                        reasons.push(`Bot does not have required mod permissions ('all'  or 'wiki') to read restricted wiki pages`);
+                    }
+                }
+
+                throw new CMError(`Wiki page ${generateFullWikiUrl(subreddit, wiki)} ${error} (${err.statusCode})${reasons.length > 0 ? `because: ${reasons.join(' | ')}` : '.'}`, {cause: err});
+            } else {
+                throw new CMError(`Wiki page ${generateFullWikiUrl(subreddit, wiki)} could not be read`, {cause: err});
+            }
+        }
+    }
+
+    async getContent(val: string, options: ExternalResourceOptions = {}): Promise<string> {
+        const {val: wikiContent, fromCache, hash} = await this.getExternalResource(val, options);
+        const {ttl = this.ttl.wikiTTL, shared = false} = options;
+
+        if (!fromCache && hash !== undefined && ttl !== false) {
+            await this.cache.set(hash, wikiContent, {ttl, shared});
         }
 
         return wikiContent;
@@ -1764,19 +1463,34 @@ export class SubredditResources {
     /**
      * Convenience method for using getContent and SnoowrapUtils@renderContent in one method
      * */
-    async renderContent(contentStr: string, data: SnoowrapActivity, ruleResults: RuleResultEntity[] = [], usernotes?: UserNotes) {
+    async renderContent(contentStr: string, activity: SnoowrapActivity, ruleResults: RuleResultEntity[] = [], actionResults: ActionResultEntity[] = [], templateData: TemplateContext = {}) {
         const content = await this.getContent(contentStr);
-        return await renderContent(content, data, ruleResults, usernotes ?? this.userNotes);
+
+        const {usernotes = this.userNotes, ...restData} = templateData;
+        return await renderContent(content, {
+            ...restData,
+            activity,
+            usernotes,
+            ruleResults,
+            actionResults,
+        });
     }
 
-    async getConfigFragment<T>(includesData: IncludesData, validateFunc?: ConfigFragmentValidationFunc): Promise<T> {
+    async renderFooter(item: Submission | Comment, footer: false | string | undefined = this.footer) {
+        if (footer === false) {
+            return '';
+        }
+        return this.renderContent(footer, item);
+    }
+
+    async getConfigFragment<T>(includesData: IncludesData, parseFunc?: ConfigFragmentParseFunc): Promise<T> {
 
         const {
             path,
-            ttl = this.wikiTTL,
+            ttl = 60,
         } = includesData;
 
-        const {val: configStr, fromCache, hash, response} = await this.getExternalResource(path);
+        const {val: configStr, fromCache, hash, response, subreddit} = await this.getExternalResource(path, {shared: true});
 
         const [format, configObj, jsonErr, yamlErr] = parseFromJsonOrYamlToObject(configStr);
         if (configObj === undefined) {
@@ -1786,19 +1500,12 @@ export class SubredditResources {
             throw new ConfigParseError(`Could not parse includes URL of '${configStr}' contents as JSON or YAML.`)
         }
 
-        // if its from cache then we know the data is valid
-        if(fromCache) {
-            this.logger.verbose(`Got Config Fragment ${path} from cache`);
-            return configObj.toJS() as unknown as T;
-        }
-
         const rawData = configObj.toJS();
         let validatedData: T;
         // otherwise now we want to validate it if a function is present
-        if(validateFunc !== undefined) {
+        if(parseFunc !== undefined) {
             try {
-               validateFunc(configObj.toJS(), fromCache);
-               validatedData = rawData as unknown as T;
+                validatedData = parseFunc(configObj.toJS(), fromCache, subreddit) as unknown as T;
             } catch (e) {
                 throw e;
             }
@@ -1806,7 +1513,12 @@ export class SubredditResources {
             validatedData = rawData as unknown as T;
         }
 
-        let ttlVal: number | false = this.wikiTTL;
+        if(fromCache) {
+            this.logger.verbose(`Got Config Fragment ${path} from cache`);
+            return validatedData as unknown as T;
+        }
+
+        let ttlVal: number | false = this.ttl.wikiTTL;
         // never cache
         if(ttl === false) {
             return validatedData;
@@ -1820,7 +1532,7 @@ export class SubredditResources {
             // otherwise fallback to wiki ttl
 
             if(response === undefined) {
-                ttlVal = this.wikiTTL;
+                ttlVal = this.ttl.wikiTTL;
             } else {
                 const cc = response.headers.get('cache-control');
                 const ex = response.headers.get('expires');
@@ -1832,7 +1544,7 @@ export class SubredditResources {
                     const matches = cc.match(/max-age=(\d+)/);
                     if(null === matches) {
                         // huh? why include max-age but no value?
-                        ttlVal = this.wikiTTL;
+                        ttlVal = this.ttl.wikiTTL;
                     } else {
                         ttlVal = parseInt(matches[1], 10);
                     }
@@ -1848,13 +1560,13 @@ export class SubredditResources {
                     }
                 } else {
                     // couldn't get a cache header, fallback
-                    ttlVal = this.wikiTTL;
+                    ttlVal = 60;
                 }
             }
         }
 
         if (ttlVal !== false) {
-            this.cache.set(hash as string, configStr, {ttl: ttlVal});
+            this.cache.set(hash as string, configStr, {ttl: ttlVal, shared: true});
         }
 
         return validatedData;
@@ -1875,7 +1587,7 @@ export class SubredditResources {
             const subResults = await this.client.getManySubreddits(uncachedSubs);
             for(const s of subResults) {
                 // @ts-ignore
-                await this.cache.set(`sub-${s.display_name}`, s, {ttl: this.subredditTTL});
+                await this.cache.set(`sub-${s.display_name}`, s, {ttl: this.ttl.subredditTTL});
             }
         }
     }
@@ -1887,6 +1599,11 @@ export class SubredditResources {
             isInclude = true,
             includeIdentifier = false,
         } = options || {};
+
+        // return early if there are no states to filter by!
+        if(states.length === 0) {
+            return items;
+        }
 
         let passedItems: (Comment | Submission)[] = [];
         let unpassedItems: (Comment | Submission)[] = [];
@@ -1967,20 +1684,18 @@ export class SubredditResources {
         }
 
         // see comments on shouldCacheSubredditStateCriteriaResult() for why this is needed
-        if (this.filterCriteriaTTL !== false && shouldCacheSubredditStateCriteriaResult(state)) {
+        if (this.ttl.filterCriteriaTTL !== false && shouldCacheSubredditStateCriteriaResult(state)) {
             try {
                 const hash = `subredditCrit-${getActivitySubredditName(item)}-${objectHash.sha1(state)}`;
-                await this.stats.cache.subredditCrit.identifierRequestCount.set(hash, (await this.stats.cache.subredditCrit.identifierRequestCount.wrap(hash, () => 0) as number) + 1);
-                this.stats.cache.subredditCrit.requestTimestamps.push(Date.now());
-                this.stats.cache.subredditCrit.requests++;
                 const cachedItem = await this.cache.get(hash);
                 if (cachedItem !== undefined && cachedItem !== null) {
                     this.logger.debug(`Cache Hit: Subreddit Check on ${getActivitySubredditName(item)} (Hash ${hash})`);
+                    await this.subredditStats.incrementCacheTypeStat('subredditCrit', hash, false);
                     return cachedItem as boolean;
                 }
                 const itemResult = await this.isSubreddit(await this.getSubreddit(item), state, author, this.logger);
-                this.stats.cache.subredditCrit.miss++;
-                await this.cache.set(hash, itemResult, {ttl: this.filterCriteriaTTL});
+                await this.subredditStats.incrementCacheTypeStat('subredditCrit', hash, true);
+                await this.cache.set(hash, itemResult, {ttl: this.ttl.filterCriteriaTTL});
                 return itemResult;
             } catch (err: any) {
                 if (err.logged !== true) {
@@ -1996,7 +1711,7 @@ export class SubredditResources {
     async testAuthorCriteria(item: (Comment | Submission), authorOptsObj: NamedCriteria<AuthorCriteria>, include = true): Promise<FilterCriteriaResult<AuthorCriteria>> {
         const {criteria: authorOpts} = authorOptsObj;
 
-        if (this.filterCriteriaTTL !== false) {
+        if (this.ttl.filterCriteriaTTL !== false) {
             // in the criteria check we only actually use the `item` to get the author flair
             // which will be the same for the entire subreddit
             //
@@ -2005,20 +1720,18 @@ export class SubredditResources {
             const hashObj = {...authorOpts, include};
             const userName = getActivityAuthorName(item.author);
             const hash = `authorCrit-${this.subreddit.display_name}-${userName}-${objectHash.sha1(hashObj)}`;
-            await this.stats.cache.authorCrit.identifierRequestCount.set(hash, (await this.stats.cache.authorCrit.identifierRequestCount.wrap(hash, () => 0) as number) + 1);
-            this.stats.cache.authorCrit.requestTimestamps.push(Date.now());
-            this.stats.cache.authorCrit.requests++;
 
             // need to check shape of result to invalidate old result type
             let cachedAuthorTest: FilterCriteriaResult<AuthorCriteria> = await this.cache.get(hash) as FilterCriteriaResult<AuthorCriteria>;
             if(cachedAuthorTest !== null && cachedAuthorTest !== undefined && typeof cachedAuthorTest === 'object') {
                 this.logger.debug(`Cache Hit: Author Check on ${userName} (Hash ${hash})`);
+                await this.subredditStats.incrementCacheTypeStat('authorCrit', hash, false);
                 return cachedAuthorTest;
             } else {
-                this.stats.cache.authorCrit.miss++;
+                await this.subredditStats.incrementCacheTypeStat('authorCrit', hash, true);
                 cachedAuthorTest = await this.isAuthor(item, authorOpts, include);
                 cachedAuthorTest.criteria = cloneDeep(authorOptsObj);
-                await this.cache.set(hash, cachedAuthorTest, {ttl: this.filterCriteriaTTL});
+                await this.cache.set(hash, cachedAuthorTest, {ttl: this.ttl.filterCriteriaTTL});
                 return cachedAuthorTest;
             }
         }
@@ -2028,7 +1741,7 @@ export class SubredditResources {
         return res;
     }
 
-    async testItemCriteria(i: (Comment | Submission), activityStateObj: NamedCriteria<TypedActivityState>, logger: Logger, include = true, source?: ActivitySource): Promise<FilterCriteriaResult<TypedActivityState>> {
+    async testItemCriteria(i: (Comment | Submission), activityStateObj: NamedCriteria<TypedActivityState>, logger: Logger, include = true, source?: ActivitySourceValue): Promise<FilterCriteriaResult<TypedActivityState>> {
         const {criteria: activityState} = activityStateObj;
         if(Object.keys(activityState).length === 0) {
             return {
@@ -2038,7 +1751,7 @@ export class SubredditResources {
                 passed: true
             }
         }
-        if (this.filterCriteriaTTL !== false) {
+        if (this.ttl.filterCriteriaTTL !== false) {
             let item = i;
             const {dispatched, source: stateSource, ...rest} = activityState;
             let state = rest;
@@ -2071,18 +1784,16 @@ export class SubredditResources {
             try {
                 // only cache non-runtime state and results
                 const hash = `itemCrit-${item.name}-${objectHash.sha1({...state, include})}`;
-                await this.stats.cache.itemCrit.identifierRequestCount.set(hash, (await this.stats.cache.itemCrit.identifierRequestCount.wrap(hash, () => 0) as number) + 1);
-                this.stats.cache.itemCrit.requestTimestamps.push(Date.now());
-                this.stats.cache.itemCrit.requests++;
                 let itemResult = await this.cache.get(hash) as FilterCriteriaResult<TypedActivityState> | undefined | null;
                 if (itemResult !== undefined && itemResult !== null) {
+                    await this.subredditStats.incrementCacheTypeStat('itemCrit', hash, false);
                     logger.debug(`Cache Hit: Item Check on ${item.name} (Hash ${hash})`);
                     //return cachedItem as boolean;
                 } else {
+                    await this.subredditStats.incrementCacheTypeStat('itemCrit', hash, true);
                     itemResult = await this.isItem(item, state, logger, include);
                 }
-                this.stats.cache.itemCrit.miss++;
-                await this.cache.set(hash, itemResult, {ttl: this.filterCriteriaTTL});
+                await this.cache.set(hash, itemResult, {ttl: this.ttl.filterCriteriaTTL});
 
                 // add in runtime results, if present
                 if(runtimeRes !== undefined) {
@@ -2192,7 +1903,7 @@ export class SubredditResources {
         })() as boolean;
     }
 
-    async isItem (item: Submission | Comment, stateCriteria: TypedActivityState, logger: Logger, include: boolean, source?: ActivitySource): Promise<FilterCriteriaResult<(SubmissionState & CommentState)>> {
+    async isItem (item: Submission | Comment, stateCriteria: TypedActivityState, logger: Logger, include: boolean, source?: ActivitySourceValue): Promise<FilterCriteriaResult<(SubmissionState & CommentState)>> {
 
         //const definedStateCriteria = (removeUndefinedKeys(stateCriteria) as RequiredItemCrit);
 
@@ -2283,10 +1994,12 @@ export class SubredditResources {
                         } else {
                             propResultsMap.source!.found = source;
 
-                            const requestedSourcesVal: string[] = !Array.isArray(itemOptVal) ? [itemOptVal] as string[] : itemOptVal as string[];
-                            const requestedSources = requestedSourcesVal.map(x => strToActivitySource(x).toLowerCase());
+                            const itemSource = new ActivitySource(source);
 
-                            propResultsMap.source!.passed = criteriaPassWithIncludeBehavior(requestedSources.some(x => source.toLowerCase().trim() === x.toLowerCase().trim()), include);
+                            const requestedSourcesVal: string[] = !Array.isArray(itemOptVal) ? [itemOptVal] as string[] : itemOptVal as string[];
+                            const requestedSources = requestedSourcesVal.map(x => new ActivitySource(x));
+
+                            propResultsMap.source!.passed = criteriaPassWithIncludeBehavior(requestedSources.some(x => x.matches(itemSource)), include);
                             break;
                         }
                     case 'score':
@@ -2421,6 +2134,23 @@ export class SubredditResources {
                         const ageTest = compareDurationValue(parseDurationComparison(itemOptVal as string), created);
                         propResultsMap.age!.passed = criteriaPassWithIncludeBehavior(ageTest, include);
                         propResultsMap.age!.found = created.format('MMMM D, YYYY h:mm A Z');
+                        break;
+                    case 'createdOn':
+                        const createdAt = dayjs.unix(await item.created);
+                        propResultsMap.createdOn!.found = createdAt.format('MMMM D, YYYY h:mm A Z');
+                        propResultsMap.createdOn!.passed = false;
+
+                        const expressions = Array.isArray(itemOptVal) ? itemOptVal as RelativeDateTimeMatch[] : [itemOptVal] as RelativeDateTimeMatch[];
+                        try {
+                            for (const expr of expressions) {
+                                if (matchesRelativeDateTime(expr, createdAt)) {
+                                    propResultsMap.createdOn!.passed = true;
+                                    break;
+                                }
+                            }
+                        } catch(err: any) {
+                            propResultsMap.createdOn!.reason = err.message;
+                        }
                         break;
                     case 'title':
                         if(asComment(item)) {
@@ -2573,13 +2303,22 @@ export class SubredditResources {
                     case 'flairTemplate':
                     case 'link_flair_text':
                     case 'link_flair_css_class':
-                        if(asSubmission(item)) {
-                            let propertyValue: string | null;
-                            if(k === 'flairTemplate') {
-                                propertyValue = await item.link_flair_template_id;
-                            } else {
-                                propertyValue = await item[k];
-                            }
+                    case 'link_flair_background_color':
+                    case 'authorFlairText':
+                    case 'authorFlairCssClass':
+                    case 'authorFlairTemplateId':
+                    case 'authorFlairBackgroundColor':
+
+                        let actualPropName = cmToSnoowrapActivityMap[k] ?? k;
+
+                        if(!asSubmission(item) && (actualPropName as string).includes('link_flair')) {
+                            propResultsMap[k]!.passed = true;
+                            propResultsMap[k]!.reason = `Cannot test for ${k} on Comment`;
+                            log.warn(`Cannot test for ${k} on Comment`);
+                            break;
+                        } else {
+                            // @ts-ignore
+                            let propertyValue: string | null = await item[actualPropName];
 
                             propResultsMap[k]!.found = propertyValue;
 
@@ -2593,14 +2332,37 @@ export class SubredditResources {
                                 // if crit is not a boolean but property is "empty" then it'll never pass anyway
                                 propResultsMap[k]!.passed = !include;
                             } else {
-                                const expectedValues = typeof itemOptVal === 'string' ? [itemOptVal] : (itemOptVal as string[]);
-                                propResultsMap[k]!.passed = criteriaPassWithIncludeBehavior(expectedValues.some(x => x.trim().toLowerCase() === propertyValue?.trim().toLowerCase()), include);
+                                // remove # if comparing hex values
+                                const isHex = k.toLowerCase().includes('background');
+
+                                const expectedValues = (typeof itemOptVal === 'string' ? [itemOptVal] : (itemOptVal as string[])).map(x => isHex ? x.replace('#','').trim() : x.trim());
+                                const cleanProp = isHex ? propertyValue.replace('#','').trim() : propertyValue.trim();
+                                let anyPassed = false;
+                                const errorReasons = [];
+                                for(const expectedVal of expectedValues) {
+                                    try {
+                                        const [regPassed] = testMaybeStringRegex(expectedVal,cleanProp);
+                                        if(regPassed) {
+                                            anyPassed = true;
+                                        }
+                                    } catch (err: any) {
+                                        if(err.message.includes('Could not convert test value')) {
+                                            errorReasons.push(`Could not convert ${expectedVal} to Regex, fallback to simple case-insenstive comparison`);
+                                            // fallback to simple comparison
+                                            anyPassed = expectedVal.toLowerCase() === cleanProp.toLowerCase();
+                                        } else {
+                                            errorReasons.push(err.message);
+                                        }
+                                    }
+                                    if(anyPassed) {
+                                        break;
+                                    }
+                                }
+                                if(errorReasons.length > 0) {
+                                    propResultsMap[k]!.reason = `Some errors occurred while testing: ${errorReasons.join(' | ')}`;
+                                }
+                                propResultsMap[k]!.passed = criteriaPassWithIncludeBehavior(anyPassed, include);
                             }
-                            break;
-                        } else {
-                            propResultsMap[k]!.passed = true;
-                            propResultsMap[k]!.reason = `Cannot test for ${k} on Comment`;
-                            log.warn(`Cannot test for ${k} on Comment`);
                             break;
                         }
                     default:
@@ -2755,94 +2517,70 @@ export class SubredditResources {
                             }
                             break;
                         case 'name':
-                            const nameVal = authorOptVal as RequiredAuthorCrit['name'];
-                            const authPass = () => {
+                        case 'flairCssClass':
+                        case 'flairText':
+                        case 'flairTemplate':
+                        case 'flairBackgroundColor':
+                        case 'description':
+                            let actualPropName = cmToSnoowrapAuthorMap[k] ?? k;
 
-                                for (const n of nameVal) {
-                                    if (n.toLowerCase() === authorName.toLowerCase()) {
-                                        return true;
+                            let propertyValue: string | null;
+                            if(k === 'name') {
+                                propertyValue = authorName;
+                            } else if(k === 'description') {
+                                // @ts-ignore
+                                propertyValue = (await user()).subreddit?.display_name.public_description;
+                            } else {
+                                // @ts-ignore
+                                propertyValue = await item[actualPropName];
+                            }
+
+                            if(k === 'description' && typeof propertyValue === 'string') {
+                                propResultsMap[k]!.found = truncateStringToLength(50)(propertyValue)
+                            } else {
+                                propResultsMap[k]!.found = propertyValue;
+                            }
+
+                            if (typeof authorOptVal === 'boolean') {
+                                if (authorOptVal === true) {
+                                    propResultsMap[k]!.passed = criteriaPassWithIncludeBehavior(propertyValue !== undefined && propertyValue !== null && propertyValue !== '', include);
+                                } else {
+                                    propResultsMap[k]!.passed = criteriaPassWithIncludeBehavior(propertyValue === undefined || propertyValue === null || propertyValue === '', include);
+                                }
+                            } else if (propertyValue === undefined || propertyValue === null || propertyValue === '') {
+                                // if crit is not a boolean but property is "empty" then it'll never pass anyway
+                                propResultsMap[k]!.passed = !include;
+                            } else {
+                                // remove # if comparing hex values
+                                const isHex = k.toLowerCase().includes('background');
+
+                                const expectedValues = (typeof authorOptVal === 'string' ? [authorOptVal] : (authorOptVal as string[])).map(x => isHex ? x.replace('#','').trim() : x.trim());
+                                const cleanProp = isHex ? propertyValue.replace('#','').trim() : propertyValue.trim();
+                                let anyPassed = false;
+                                const errorReasons = [];
+                                for(const expectedVal of expectedValues) {
+                                    try {
+                                        const [regPassed] = testMaybeStringRegex(expectedVal,cleanProp);
+                                        if(regPassed) {
+                                            anyPassed = true;
+                                        }
+                                    } catch (err: any) {
+                                        if(err.message.includes('Could not convert test value')) {
+                                            errorReasons.push(`Could not convert ${expectedVal} to Regex, fallback to simple case-insenstive comparison`);
+                                            // fallback to simple comparison
+                                            anyPassed = expectedVal.toLowerCase() === cleanProp.toLowerCase();
+                                        } else {
+                                            errorReasons.push(err.message);
+                                        }
+                                    }
+                                    if(anyPassed) {
+                                        break;
                                     }
                                 }
-                                return false;
-                            }
-                            const authResult = authPass();
-                            propResultsMap.name!.found = authorName;
-                            propResultsMap.name!.passed = criteriaPassWithIncludeBehavior(authResult, include);
-                            if (!propResultsMap.name!.passed) {
-                                shouldContinue = false;
-                            }
-                            break;
-                        case 'flairCssClass':
-                            const css = await item.author_flair_css_class;
-                            propResultsMap.flairCssClass!.found = css;
-
-                            let cssResult:boolean;
-
-                            if (typeof authorOptVal === 'boolean') {
-                                if (authorOptVal === true) {
-                                    cssResult = css !== undefined && css !== null && css !== '';
-                                } else {
-                                    cssResult = css === undefined || css === null || css === '';
+                                if(errorReasons.length > 0) {
+                                    propResultsMap[k]!.reason = `Some errors occurred while testing: ${errorReasons.join(' | ')}`;
                                 }
-                            } else if (css === undefined || css === null || css === '') {
-                                // if crit is not a boolean but property is "empty" then it'll never pass anyway
-                                cssResult = false;
-                            } else {
-                                const opts = Array.isArray(authorOptVal) ? authorOptVal as string[] : [authorOptVal] as string[];
-                                cssResult = opts.some(x => x.trim().toLowerCase() === css.trim().toLowerCase())
-                            }
-
-                            propResultsMap.flairCssClass!.passed = criteriaPassWithIncludeBehavior(cssResult, include);
-                            if (!propResultsMap.flairCssClass!.passed) {
-                                shouldContinue = false;
-                            }
-                            break;
-                        case 'flairText':
-
-                            const text = await item.author_flair_text;
-                            propResultsMap.flairText!.found = text;
-
-                            let textResult: boolean;
-                            if (typeof authorOptVal === 'boolean') {
-                                if (authorOptVal === true) {
-                                    textResult = text !== undefined && text !== null && text !== '';
-                                } else {
-                                    textResult = text === undefined || text === null || text === '';
-                                }
-                            } else if (text === undefined || text === null) {
-                                // if crit is not a boolean but property is "empty" then it'll never pass anyway
-                                textResult = false;
-                            } else {
-                                const opts = Array.isArray(authorOptVal) ? authorOptVal as string[] : [authorOptVal] as string[];
-                                textResult = opts.some(x => x.trim().toLowerCase() === text.trim().toLowerCase())
-                            }
-                            propResultsMap.flairText!.passed = criteriaPassWithIncludeBehavior(textResult, include);
-                            if (!propResultsMap.flairText!.passed) {
-                                shouldContinue = false;
-                            }
-                            break;
-                        case 'flairTemplate':
-                            const templateId = await item.author_flair_template_id;
-                            propResultsMap.flairTemplate!.found = templateId;
-
-                            let templateResult: boolean;
-                            if (typeof authorOptVal === 'boolean') {
-                                if (authorOptVal === true) {
-                                    templateResult = templateId !== undefined && templateId !== null && templateId !== '';
-                                } else {
-                                    templateResult = templateId === undefined || templateId === null || templateId === '';
-                                }
-                            } else if (templateId === undefined || templateId === null || templateId === '') {
-                                // if crit is not a boolean but property is "empty" then it'll never pass anyway
-                                templateResult = false;
-                            } else {
-                                const opts = Array.isArray(authorOptVal) ? authorOptVal as string[] : [authorOptVal] as string[];
-                                templateResult = opts.some(x => x.trim() === templateId);
-                            }
-
-                            propResultsMap.flairTemplate!.passed = criteriaPassWithIncludeBehavior(templateResult, include);
-                            if (!propResultsMap.flairTemplate!.passed) {
-                                shouldContinue = false;
+                                propResultsMap[k]!.passed = criteriaPassWithIncludeBehavior(anyPassed, include);
                             }
                             break;
                         case 'isMod':
@@ -2932,39 +2670,12 @@ export class SubredditResources {
                                 shouldContinue = false;
                             }
                             break;
-                        case 'description':
-                            // @ts-ignore
-                            const desc = (await user()).subreddit?.display_name.public_description;
-                            const dVals = authorOpts[k] as string[];
-                            let passed = false;
-                            let passReg;
-                            for (const val of dVals) {
-                                let reg = parseStringToRegex(val, 'i');
-                                if (reg === undefined) {
-                                    reg = parseStringToRegex(`/.*${escapeRegex(val.trim())}.*/`, 'i');
-                                    if (reg === undefined) {
-                                        throw new SimpleError(`Could not convert 'description' value to a valid regex: ${authorOpts[k] as string}`);
-                                    }
-                                }
-                                if (reg.test(desc)) {
-                                    passed = true;
-                                    passReg = reg.toString();
-                                    break;
-                                }
-                            }
-                            propResultsMap.description!.found = typeof desc === 'string' ? truncateStringToLength(50)(desc) : desc;
-                            propResultsMap.description!.passed = criteriaPassWithIncludeBehavior(passed, include);
-                            if (!propResultsMap.description!.passed) {
-                                shouldContinue = false;
-                            } else {
-                                propResultsMap.description!.reason = `Matched with: ${passReg as string}`;
-                            }
-                            break;
                         case 'userNotes':
+                            const unCriterias = (authorOpts[k] as UserNoteCriteria[]).map(x => toFullUserNoteCriteria(x));
                             const notes = await this.userNotes.getUserNotes(item.author);
                             let foundNoteResult: string[] = [];
                             const notePass = () => {
-                                for (const noteCriteria of authorOpts[k] as UserNoteCriteria[]) {
+                                for (const noteCriteria of unCriterias) {
                                     const {count = '>= 1', search = 'current', type} = noteCriteria;
                                     const {
                                         value,
@@ -2973,26 +2684,14 @@ export class SubredditResources {
                                         duration,
                                         extra = ''
                                     } = parseGenericValueOrPercentComparison(count);
-                                    const cutoffDate = duration === undefined ? undefined : dayjs().subtract(duration);
                                     const order = extra.includes('asc') ? 'ascending' : 'descending';
                                     switch (search) {
-                                        case 'current':
-                                            if (notes.length > 0) {
-                                                const currentNoteType = notes[notes.length - 1].noteType;
-                                                foundNoteResult.push(`Current => ${currentNoteType}`);
-                                                if (currentNoteType === type) {
-                                                    return true;
-                                                }
-                                            } else {
-                                                foundNoteResult.push('No notes present');
-                                            }
-                                            break;
                                         case 'consecutive':
                                             if (isPercent) {
                                                 throw new SimpleError(`When comparing UserNotes with 'consecutive' search 'count' cannot be a percentage. Given: ${count}`);
                                             }
 
-                                            let orderedNotes = cutoffDate === undefined ? notes : notes.filter(x => x.time.isSameOrAfter(cutoffDate));
+                                            let orderedNotes = [...notes];
                                             if (order === 'descending') {
                                                 orderedNotes = [...notes];
                                                 orderedNotes.reverse();
@@ -3000,7 +2699,7 @@ export class SubredditResources {
                                             let currCount = 0;
                                             let maxCount = 0;
                                             for (const note of orderedNotes) {
-                                                if (note.noteType === type) {
+                                                if(note.matches(noteCriteria, item)) {
                                                     currCount++;
                                                     maxCount = Math.max(maxCount, currCount);
                                                 } else {
@@ -3012,8 +2711,10 @@ export class SubredditResources {
                                                 return true;
                                             }
                                             break;
+                                        case 'current':
                                         case 'total':
-                                            const filteredNotes = notes.filter(x => x.noteType === type && cutoffDate === undefined || (x.time.isSameOrAfter(cutoffDate)));
+                                            const notesToUse = search === 'current' && notes.length > 0 ? [notes[notes.length - 1]] : notes;
+                                            const filteredNotes = notesToUse.filter(x => x.matches(noteCriteria, item));
                                             if (isPercent) {
                                                 // avoid divide by zero
                                                 const percent = notes.length === 0 ? 0 : filteredNotes.length / notes.length;
@@ -3023,7 +2724,7 @@ export class SubredditResources {
                                                 }
                                             } else {
                                                 foundNoteResult.push(`${filteredNotes.length} are ${type}`);
-                                                if (comparisonTextOp(notes.filter(x => x.noteType === type).length, operator, value)) {
+                                                if (comparisonTextOp(filteredNotes.length, operator, value)) {
                                                     return true;
                                                 }
                                             }
@@ -3279,17 +2980,15 @@ export class SubredditResources {
     async getCommentCheckCacheResult(item: Comment, checkConfig: object): Promise<CheckResultEntity | Pick<CheckResultEntity, 'triggered' | 'results'> | undefined> {
         const userName = getActivityAuthorName(item.author);
         const hash = `commentUserResult-${userName}-${item.link_id}-${objectHash.sha1(checkConfig)}`;
-        this.stats.cache.commentCheck.requests++;
-        this.stats.cache.commentCheck.requestTimestamps.push(Date.now());
-        await this.stats.cache.commentCheck.identifierRequestCount.set(hash, (await this.stats.cache.commentCheck.identifierRequestCount.wrap(hash, () => 0) as number) + 1);
         let result = await this.cache.get(hash) as { id: string, results: (RuleResultEntity | RuleSetResultEntity)[], triggered: boolean } | undefined | null;
         if (result === null) {
             result = undefined;
         }
         if (result === undefined) {
-            this.stats.cache.commentCheck.miss++;
+            await this.subredditStats.incrementCacheTypeStat('commentCheck', hash, true);
             return result;
         }
+        await this.subredditStats.incrementCacheTypeStat('commentCheck', hash, false);
         const {id, results, triggered} = result;
         this.logger.debug(`Cache Hit: Comment Check for ${userName} in Submission ${item.link_id} (Hash ${hash})`);
         // check if the Check was persisted since that would be easiest
@@ -3340,29 +3039,26 @@ export class SubredditResources {
         this.logger.debug(`Cached check result '${result.check.name}' for User ${userName} on Submission ${item.link_id} for ${ttl} seconds (Hash ${hash})`);
     }
 
-    async generateFooter(item: Submission | Comment, actionFooter?: false | string) {
-        let footer = actionFooter !== undefined ? actionFooter : this.footer;
-        if (footer === false) {
-            return '';
+    async getImageHash(img: ImageData): Promise<Required<ImageHashCacheData>|undefined> {
+
+        if(img.hashResult !== undefined && img.hashResultFlipped !== undefined) {
+            return img.toHashCache() as Required<ImageHashCacheData>;
         }
-        const subName = await item.subreddit.display_name;
-        const permaLink = `https://reddit.com${await item.permalink}`
-        const modmailLink = `https://www.reddit.com/message/compose?to=%2Fr%2F${subName}&message=${encodeURIComponent(permaLink)}`
 
-        const footerRawContent = await this.getContent(footer, item.subreddit);
-        return he.decode(Mustache.render(footerRawContent, {subName, permaLink, modmailLink, botLink: BOT_LINK}));
-    }
-
-    async getImageHash(img: ImageData): Promise<string|undefined> {
-        const hash = `imgHash-${img.baseUrl}`;
+        const hash = `imgHash-${img.basePath}`;
         const result = await this.cache.get(hash) as string | undefined | null;
-        this.stats.cache.imageHash.requests++
-        this.stats.cache.imageHash.requestTimestamps.push(Date.now());
-        await this.stats.cache.imageHash.identifierRequestCount.set(hash, (await this.stats.cache.imageHash.identifierRequestCount.wrap(hash, () => 0) as number) + 1);
         if(result !== undefined && result !== null) {
-            return result;
+            try {
+                const data =  JSON.parse(result);
+                if(asStrongImageHashCache(data)) {
+                    await this.subredditStats.incrementCacheTypeStat('imageHash', hash, false);
+                    return data;
+                }
+            } catch (e) {
+                // had old values, just drop it
+            }
         }
-        this.stats.cache.commentCheck.miss++;
+        await this.subredditStats.incrementCacheTypeStat('imageHash', hash, true);
         return undefined;
         // const hash = await this.cache.wrap(img.baseUrl, async () => await img.hash(true), { ttl }) as string;
         // if(img.hashResult === undefined) {
@@ -3371,8 +3067,8 @@ export class SubredditResources {
         // return hash;
     }
 
-    async setImageHash(img: ImageData, hash: string, ttl: number): Promise<void> {
-        await this.cache.set(`imgHash-${img.baseUrl}`, hash, {ttl});
+    async setImageHash(img: ImageData, ttl: number): Promise<void> {
+        await this.cache.set(`imgHash-${img.basePath}`, img.toHashCache() as Required<ImageHashCacheData>, {ttl});
         // const hash = await this.cache.wrap(img.baseUrl, async () => await img.hash(true), { ttl }) as string;
         // if(img.hashResult === undefined) {
         //     img.hashResult = hash;
@@ -3386,236 +3082,20 @@ export class SubredditResources {
         }
         return undefined;
     }
-}
 
-export class BotResourcesManager {
-    resources: Map<string, SubredditResources> = new Map();
-    authorTTL: number = 10000;
-    enabled: boolean = true;
-    modStreams: Map<string, SPoll<Snoowrap.Submission | Snoowrap.Comment>> = new Map();
-    defaultCache: Cache;
-    defaultCacheConfig: StrongCache
-    defaultCacheMigrated: boolean = false;
-    cacheType: string = 'none';
-    cacheHash: string;
-    ttlDefaults: Required<TTLConfig>;
-    actionedEventsMaxDefault?: number;
-    actionedEventsDefault: number;
-    pruneInterval: any;
-    defaultThirdPartyCredentials: ThirdPartyCredentialsJsonConfig;
-    logger: Logger;
-    botAccount?: string;
-    defaultDatabase: DataSource
-    botName!: string
-    retention?: EventRetentionPolicyRange
-
-    invokeeRepo: Repository<InvokeeType>
-    runTypeRepo: Repository<RunStateType>
-
-    constructor(config: BotInstanceConfig, logger: Logger) {
-        const {
-            caching: {
-                authorTTL,
-                userNotesTTL,
-                wikiTTL,
-                commentTTL,
-                submissionTTL,
-                subredditTTL,
-                filterCriteriaTTL,
-                modNotesTTL,
-                selfTTL,
-                provider,
-                actionedEventsMax,
-                actionedEventsDefault,
-            },
-            name,
-            credentials: {
-                reddit,
-                ...thirdParty
-            },
-            database,
-            databaseConfig: {
-                retention
-            } = {},
-            caching,
-        } = config;
-        caching.provider.prefix = buildCachePrefix([caching.provider.prefix, 'SHARED']);
-        const {actionedEventsMax: eMax, actionedEventsDefault: eDef, ...relevantCacheSettings} = caching;
-        this.cacheHash = objectHash.sha1(relevantCacheSettings);
-        this.defaultCacheConfig = caching;
-        this.defaultThirdPartyCredentials = thirdParty;
-        this.defaultDatabase = database;
-        this.ttlDefaults = {authorTTL, userNotesTTL, wikiTTL, commentTTL, submissionTTL, filterCriteriaTTL, subredditTTL, selfTTL, modNotesTTL};
-        this.botName = name as string;
-        this.logger = logger;
-        this.invokeeRepo = this.defaultDatabase.getRepository(InvokeeType);
-        this.runTypeRepo = this.defaultDatabase.getRepository(RunStateType);
-        this.retention = retention;
-
-        const options = provider;
-        this.cacheType = options.store;
-        this.actionedEventsMaxDefault = actionedEventsMax;
-        this.actionedEventsDefault = actionedEventsDefault;
-        this.defaultCache = createCacheManager(options);
-        if (this.cacheType === 'memory') {
-            const min = Math.min(...([this.ttlDefaults.wikiTTL, this.ttlDefaults.authorTTL, this.ttlDefaults.userNotesTTL].filter(x => typeof x === 'number' && x !== 0) as number[]));
-            if (min > 0) {
-                // set default prune interval
-                this.pruneInterval = setInterval(() => {
-                    // @ts-ignore
-                    this.defaultCache?.store.prune();
-                    // kinda hacky but whatever
-                    const logger = winston.loggers.get('app');
-                    logger.debug('Pruned Shared Cache');
-                    // prune interval should be twice the smallest TTL
-                }, min * 1000 * 2)
-            }
+    async getSubredditRemovalReasons(): Promise<SubredditRemovalReason[]> {
+        if(this.ttl.wikiTTL !== false) {
+            return await this.cache.wrap(`removalReasons`, async () => {
+                const res = await this.client.getSubredditRemovalReasons(this.subreddit.display_name);
+                return Object.values(res.data);
+            }, { ttl: this.ttl.wikiTTL }) as SubredditRemovalReason[];
         }
+        const res = await this.client.getSubredditRemovalReasons(this.subreddit.display_name);
+        return Object.values(res.data);
     }
 
-    get(subName: string): SubredditResources | undefined {
-        if (this.resources.has(subName)) {
-            return this.resources.get(subName) as SubredditResources;
-        }
-        return undefined;
-    }
-
-    async set(subName: string, initOptions: SubredditResourceConfig): Promise<SubredditResources> {
-        let hash = 'default';
-        const { caching, credentials, retention, ...init } = initOptions;
-
-        // const bEntity = await this.defaultDatabase.getRepository(Bot).findOne({where: {name: this.botName}}) as Bot;
-        // //const subreddit = this.defaultDatabase.getRepository(SubredditEntity).findOne({name: initOptions.subreddit.display_name});
-        // const mEntity = await this.defaultDatabase.getRepository(Manager).findOne({
-        //     where: {
-        //         name: subName,
-        //         bot: {
-        //             id: bEntity.id
-        //         }
-        //     },
-        //     relations: ['bot']
-        // });
-
-        let opts: SubredditResourceOptions = {
-            cache: this.defaultCache,
-            cacheType: this.cacheType,
-            cacheSettingsHash: hash,
-            ttl: this.ttlDefaults,
-            thirdPartyCredentials: credentials ?? this.defaultThirdPartyCredentials,
-            prefix: this.defaultCacheConfig.provider.prefix,
-            actionedEventsMax: this.actionedEventsMaxDefault !== undefined ? Math.min(this.actionedEventsDefault, this.actionedEventsMaxDefault) : this.actionedEventsDefault,
-            database: this.defaultDatabase,
-            botName: this.botName,
-            retention: retention ?? this.retention,
-            ...init,
-        };
-
-        if(caching !== undefined) {
-            const {provider = this.defaultCacheConfig.provider, actionedEventsMax = this.actionedEventsDefault, ...rest} = caching;
-            let cacheConfig = {
-                provider: buildCacheOptionsFromProvider(provider),
-                ttl: {
-                    ...this.ttlDefaults,
-                    ...rest
-                },
-            }
-            hash = objectHash.sha1(cacheConfig);
-            // only need to create private if there settings are actually different than the default
-            if(hash !== this.cacheHash) {
-                const {provider: trueProvider, ...trueRest} = cacheConfig;
-                const defaultPrefix = trueProvider.prefix;
-                const subPrefix = defaultPrefix === this.defaultCacheConfig.provider.prefix ? buildCachePrefix([(defaultPrefix !== undefined ? defaultPrefix.replace('SHARED', '') : defaultPrefix), subName]) : trueProvider.prefix;
-                trueProvider.prefix = subPrefix;
-                const eventsMax = this.actionedEventsMaxDefault !== undefined ? Math.min(actionedEventsMax, this.actionedEventsMaxDefault) : actionedEventsMax;
-                opts = {
-                    cache: createCacheManager(trueProvider),
-                    actionedEventsMax: eventsMax,
-                    cacheType: trueProvider.store,
-                    cacheSettingsHash: hash,
-                    thirdPartyCredentials: credentials ?? this.defaultThirdPartyCredentials,
-                    prefix: subPrefix,
-                    botName: this.botName,
-                    database: this.defaultDatabase,
-                    retention: retention ?? this.retention,
-                    ...init,
-                    ...trueRest,
-                };
-                await runMigrations(opts.cache, opts.logger, trueProvider.prefix);
-            }
-        } else if(!this.defaultCacheMigrated) {
-            await runMigrations(this.defaultCache, this.logger, opts.prefix);
-            this.defaultCacheMigrated = true;
-        }
-
-        let resource: SubredditResources;
-        const res = this.get(subName);
-        if(res === undefined || res.cacheSettingsHash !== hash) {
-            resource = new SubredditResources(subName, {...opts, delayedItems: res?.delayedItems, botAccount: this.botAccount});
-            await resource.initStats();
-            resource.setHistoricalSaveInterval();
-            this.resources.set(subName, resource);
-        } else {
-            // just set non-cache related settings
-            resource = res;
-            resource.botAccount = this.botAccount;
-            if(opts.footer !== resource.footer) {
-                resource.footer = opts.footer || DEFAULT_FOOTER;
-            }
-            // reset cache stats when configuration is reloaded
-            resource.stats.cache = cacheStats();
-        }
-        await resource.initDatabaseDelayedActivities();
-
-        return resource;
-    }
-
-    async destroy(subName: string) {
-        const res = this.get(subName);
-        if(res !== undefined) {
-            await res.destroy();
-            this.resources.delete(subName);
-        }
-    }
-
-    async getPendingSubredditInvites(): Promise<(string[])> {
-        const subredditNames = await this.defaultCache.get(`modInvites`);
-        if (subredditNames !== undefined && subredditNames !== null) {
-            return subredditNames as string[];
-        }
-        return [];
-    }
-
-    async addPendingSubredditInvite(subreddit: string): Promise<void> {
-        if(subreddit === null || subreddit === undefined || subreddit == '') {
-            throw new CMError('Subreddit name cannot be empty');
-        }
-        let subredditNames = await this.defaultCache.get(`modInvites`) as (string[] | undefined | null);
-        if (subredditNames === undefined || subredditNames === null) {
-            subredditNames = [];
-        }
-        const cleanName = subreddit.trim();
-
-        if(subredditNames.some(x => x.trim().toLowerCase() === cleanName.toLowerCase())) {
-            throw new CMError(`An invite for the Subreddit '${subreddit}' already exists`);
-        }
-        subredditNames.push(cleanName);
-        await this.defaultCache.set(`modInvites`, subredditNames, {ttl: 0});
-        return;
-    }
-
-    async deletePendingSubredditInvite(subreddit: string): Promise<void> {
-        let subredditNames = await this.defaultCache.get(`modInvites`) as (string[] | undefined | null);
-        if (subredditNames === undefined || subredditNames === null) {
-            subredditNames = [];
-        }
-        subredditNames = subredditNames.filter(x => x.toLowerCase() !== subreddit.trim().toLowerCase());
-        await this.defaultCache.set(`modInvites`, subredditNames, {ttl: 0});
-        return;
-    }
-
-    async clearPendingSubredditInvites(): Promise<void> {
-        await this.defaultCache.del(`modInvites`);
-        return;
+    async getSubredditRemovalReasonById(id: string): Promise<SubredditRemovalReason | undefined> {
+        return (await this.getSubredditRemovalReasons()).find(x => x.id === id);
     }
 }
 
@@ -3693,7 +3173,7 @@ export const checkAuthorFilter = async (item: (Submission | Comment), filter: Au
     return [true, undefined, {criteriaResults: allCritResults, join: 'OR', passed: true}];
 }
 
-export const checkItemFilter = async (item: (Submission | Comment), filter: ItemOptions, resources: SubredditResources, options?: {logger?: Logger, source?: ActivitySource, includeIdentifier?: boolean}): Promise<[boolean, ('inclusive' | 'exclusive' | undefined), FilterResult<TypedActivityState>]> => {
+export const checkItemFilter = async (item: (Submission | Comment), filter: ItemOptions, resources: SubredditResources, options?: {logger?: Logger, source?: ActivitySourceValue, includeIdentifier?: boolean}): Promise<[boolean, ('inclusive' | 'exclusive' | undefined), FilterResult<TypedActivityState>]> => {
 
     const {
         logger: parentLogger = NoopLogger,
@@ -3851,7 +3331,7 @@ export const checkItemFilter = async (item: (Submission | Comment), filter: Item
     return [true, undefined, {criteriaResults: allCritResults, join: 'OR', passed: true}];
 }
 
-export const checkCommentSubmissionStates = async (item: Comment, submissionStates: SubmissionState[], resources: SubredditResources, logger: Logger, source?: ActivitySource, excludeCondition?: JoinOperands): Promise<[boolean, FilterCriteriaPropertyResult<CommentState>]> => {
+export const checkCommentSubmissionStates = async (item: Comment, submissionStates: SubmissionState[], resources: SubredditResources, logger: Logger, source?: ActivitySourceValue, excludeCondition?: JoinOperands): Promise<[boolean, FilterCriteriaPropertyResult<CommentState>]> => {
     // test submission state first since it's more likely(??) we have crit results or cache data for this submission than for the comment
 
     // get submission

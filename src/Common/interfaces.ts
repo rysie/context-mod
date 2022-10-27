@@ -21,7 +21,7 @@ import {
     DurationVal,
     EventRetentionPolicyRange,
     JoinOperands,
-    NonDispatchActivitySource,
+    NonDispatchActivitySourceValue,
     NotificationEventType,
     NotificationProvider,
     onExistingFoundBehavior,
@@ -481,6 +481,8 @@ export interface TTLConfig {
     modNotesTTL?: number | boolean;
 }
 
+export type StrongTTLConfig = Record<keyof Required<TTLConfig>, number | false>;
+
 export interface CacheConfig extends TTLConfig {
     /**
      * The cache provider and, optionally, a custom configuration for that provider
@@ -490,32 +492,9 @@ export interface CacheConfig extends TTLConfig {
      * To specify another `provider` but use its default configuration set this property to a string of one of the available providers: `memory`, `redis`, or `none`
      * */
     provider?: CacheProvider | CacheOptions
-
-    /**
-     * The **maximum** number of Events that the cache should store triggered result summaries for
-     *
-     * These summaries are viewable through the Web UI.
-     *
-     * The value specified by a subreddit cannot be larger than the value set by the Operator for the global/bot config (if set)
-     *
-     * @default 25
-     * @example [25]
-     * */
-    actionedEventsMax?: number
 }
 
 export interface OperatorCacheConfig extends CacheConfig {
-    /**
-     * The **default** number of Events that the cache will store triggered result summaries for
-     *
-     * These summaries are viewable through the Web UI.
-     *
-     * The value specified cannot be larger than `actionedEventsMax` for the global/bot config (if set)
-     *
-     * @default 25
-     * @example [25]
-     * */
-    actionedEventsDefault?: number
 }
 
 export interface Footer {
@@ -672,6 +651,33 @@ export interface ManagerOptions {
      *
      * */
     retention?: EventRetentionPolicyRange
+
+    /**
+     * Enables config sharing
+     *
+     * * (Default) When `false` sharing is not enabled
+     * * When `true` any bot that can access this bot's config wiki page can use inpm t
+     * * When an object, use `include` or `exclude` to define subreddits that can access this config
+     * */
+    sharing?: boolean | string[] | SharingACLConfig
+}
+
+export interface SharingACLConfig {
+    /**
+     * A list of subreddits, or regular expressions for subreddit names, that are allowed to access this config
+     * */
+    include?: string[]
+    /**
+     * A list of subreddits, or regular expressions for subreddit names, that are NOT allowed to access this config
+     *
+     * If `include` is defined this property is ignored
+     * */
+    exclude?: string[]
+}
+
+export interface StrongSharingACLConfig {
+    include?: RegExp[]
+    exclude?: RegExp[]
 }
 
 export interface ThresholdCriteria {
@@ -753,8 +759,6 @@ export type StrongCache = {
     modNotesTTL: number | boolean,
     filterCriteriaTTL: number | boolean,
     provider: CacheOptions
-    actionedEventsMax?: number,
-    actionedEventsDefault: number,
 }
 
 /**
@@ -813,6 +817,11 @@ export interface CacheOptions {
      * @examples [500]
      * */
     max?: number
+
+    /**
+     * A prefix to add to all keys
+     * */
+    prefix?: string
 
     [key:string]: any
 }
@@ -1060,6 +1069,16 @@ export interface SubredditOverrides {
          * */
         retention?: EventRetentionPolicyRange
     }
+
+    /**
+     * The relative URL to the ContextMod wiki page EX `https://reddit.com/r/subreddit/wiki/<path>`
+     *
+     * This will override the default relative URL as well as any URL set at the bot-level
+     *
+     * @default "botconfig/contextbot"
+     * @examples ["botconfig/contextbot"]
+     * */
+    wikiConfig?: string
 }
 
 /**
@@ -1480,20 +1499,6 @@ export interface OperatorJsonConfig {
         }
 
         /**
-         * Settings related to oauth flow invites
-         * */
-        invites?: {
-            /**
-            * Number of seconds an invite should be valid for
-             *
-             * If `0` or not specified (default) invites do not expire
-            *
-            * @default 0
-            * @examples [0]
-            * */
-            maxAge?: number
-        }
-        /**
          * The default log level to filter to in the web interface
          *
          * If not specified or `null` will be same as global `logLevel`
@@ -1548,6 +1553,8 @@ export interface OperatorJsonConfig {
         secret?: string,
         /**
          * A friendly name for this server. This will override `friendly` in `BotConnection` if specified.
+         *
+         * If none is set one is randomly generated.
          * */
         friendly?: string,
     }
@@ -1585,6 +1592,9 @@ export interface RequiredWebRedditCredentials extends RedditCredentials {
 
 export interface ThirdPartyCredentialsJsonConfig {
     youtube?: {
+        apiKey: string
+    }
+    mhs?: {
         apiKey: string
     }
     [key: string]: any
@@ -1659,9 +1669,6 @@ export interface OperatorConfig extends OperatorJsonConfig {
             secret?: string,
             storage?: 'database' | 'cache'
         },
-        invites: {
-          maxAge: number
-        },
         logLevel?: LogLevel,
         maxLogs: number,
         clients: BotConnection[]
@@ -1735,6 +1742,7 @@ export interface ActionProcessResult {
     dryRun: boolean,
     result?: string
     touchedEntities?: (Submission | Comment | RedditUser | string)[]
+    data?: any
 }
 
 export interface EventActivity {
@@ -1968,7 +1976,7 @@ export type RequiredItemCrit = Required<(CommentState & SubmissionState)>;
 
 export interface ActivityDispatchConfig {
     identifier?: string
-    cancelIfQueued?: boolean | NonDispatchActivitySource | NonDispatchActivitySource[]
+    cancelIfQueued?: boolean | NonDispatchActivitySourceValue | NonDispatchActivitySourceValue[]
     goto?: string
     onExistingFound?: onExistingFoundBehavior
     tardyTolerant?: boolean | DurationVal

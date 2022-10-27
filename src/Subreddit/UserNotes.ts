@@ -16,6 +16,10 @@ import {Cache} from 'cache-manager';
 import {isScopeError} from "../Utils/Errors";
 import {ErrorWithCause} from "pony-cause";
 import {UserNoteType} from "../Common/Infrastructure/Atomic";
+import {CMCache} from "../Common/Cache";
+import {FullUserNoteCriteria, UserNoteCriteria} from "../Common/Infrastructure/Filters/FilterCriteria";
+import {parseGenericValueOrPercentComparison} from "../Common/Infrastructure/Comparisons";
+import {SnoowrapActivity} from "../Common/Infrastructure/Reddit";
 
 interface RawUserNotesPayload {
     ver: number,
@@ -67,7 +71,7 @@ export class UserNotes {
     moderators?: RedditUser[];
     logger: Logger;
     identifier: string;
-    cache: Cache
+    cache: CMCache
     cacheCB: Function;
     mod?: RedditUser;
 
@@ -77,7 +81,7 @@ export class UserNotes {
     debounceCB: any;
     batchCount: number = 0;
 
-    constructor(ttl: number | boolean, subreddit: string, client: Snoowrap, logger: Logger, cache: Cache, cacheCB: Function) {
+    constructor(ttl: number | boolean, subreddit: string, client: Snoowrap, logger: Logger, cache: CMCache, cacheCB: Function) {
         this.notesTTL = ttl === true ? 0 : ttl;
         this.subreddit = client.getSubreddit(subreddit);
         this.logger = logger;
@@ -249,6 +253,44 @@ export class UserNote {
 
     constructor(public time: Dayjs, public text: string, public modIndex: number, public noteType: UserNoteType | number, public link: (string | null) = null, public moderator?: RedditUser) {
 
+    }
+
+    public matches(criteria: FullUserNoteCriteria, item?: SnoowrapActivity) {
+        if (criteria.type !== undefined) {
+            if(typeof this.noteType === 'string') {
+                if(this.noteType.toLowerCase() !== criteria.type.toLowerCase().trim()) {
+                    return false
+                }
+            } else {
+                return false;
+            }
+        }
+        if (criteria.note !== undefined && !criteria.note.some(x => x.test(this.text ?? ''))) {
+            return false;
+        }
+        if(criteria.referencesCurrentActivity !== undefined) {
+            if(criteria.referencesCurrentActivity) {
+                if(item === undefined) {
+                    return false;
+                }
+                if(this.link === null) {
+                    return false;
+                }
+                if(!this.link.includes(item.id)) {
+                    return false;
+                }
+            } else if(this.link !== null && item !== undefined && this.link.includes(item.id)) {
+                return false;
+            }
+        }
+        const {duration} = parseGenericValueOrPercentComparison(criteria.count ?? '>= 1');
+        if (duration !== undefined) {
+            const cutoffDate = dayjs().subtract(duration);
+            if (this.time.isSameOrAfter(cutoffDate)) {
+                return false;
+            }
+        }
+        return true;
     }
 
     public toRaw(constants: UserNotesConstants): RawNote {

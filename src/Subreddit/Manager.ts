@@ -9,8 +9,15 @@ import {
     createRetryHandler,
     determineNewResults,
     findLastIndex,
-    formatNumber, frequencyEqualOrLargerThanMin, getActivityAuthorName, isComment, isSubmission, likelyJson5,
-    mergeArr, normalizeName,
+    formatNumber,
+    frequencyEqualOrLargerThanMin,
+    generateFullWikiUrl,
+    getActivityAuthorName,
+    isComment,
+    isSubmission,
+    likelyJson5,
+    mergeArr,
+    normalizeName,
     parseRedditEntity,
     pollingInfo,
     resultsSummary,
@@ -46,10 +53,7 @@ import {Submission, Comment, Subreddit} from 'snoowrap/dist/objects';
 import {activityIsRemoved, ItemContent, itemContentPeek} from "../Utils/SnoowrapUtils";
 import LoggedError from "../Utils/LoggedError";
 import {
-    BotResourcesManager,
-    SubredditResourceConfig,
-    SubredditResources,
-    SubredditResourceSetOptions
+    SubredditResources
 } from "./SubredditResources";
 import {SPoll, UnmoderatedStream, ModQueueStream, SubmissionStream, CommentStream} from "./Streams";
 import EventEmitter from "events";
@@ -67,7 +71,7 @@ import {
     isRateLimitError,
     isSeriousError,
     isStatusError,
-    RunProcessingError
+    RunProcessingError, SimpleError
 } from "../Utils/Errors";
 import {ErrorWithCause, stackWithCauses} from "pony-cause";
 import {Run} from "../Run";
@@ -87,8 +91,7 @@ import {InvokeeType} from "../Common/Entities/InvokeeType";
 import {RunStateType} from "../Common/Entities/RunStateType";
 import {EntityRunState} from "../Common/Entities/EntityRunState/EntityRunState";
 import {
-    ActivitySource,
-    DispatchSource,
+    ActivitySourceValue,
     EventRetentionPolicyRange,
     Invokee,
     PollOn,
@@ -99,6 +102,11 @@ import {parseFromJsonOrYamlToObject} from "../Common/Config/ConfigUtil";
 import {FilterCriteriaDefaults} from "../Common/Infrastructure/Filters/FilterShapes";
 import {InfluxClient} from "../Common/Influx/InfluxClient";
 import { Point } from "@influxdata/influxdb-client";
+import {NormalizedManagerResponse} from "../Web/Common/interfaces";
+import {guestEntityToApiGuest} from "../Common/Entities/Guest/GuestEntity";
+import {BotResourcesManager} from "../Bot/ResourcesManager";
+import {SubredditResourceConfig} from "../Common/Subreddit/SubredditResourceInterfaces";
+import objectHash from "object-hash";
 
 export interface RunningState {
     state: RunState,
@@ -119,7 +127,7 @@ export interface runCheckOptions {
     force?: boolean,
     gotoContext?: string
     maxGotoDepth?: number
-    source: ActivitySource
+    source: ActivitySourceValue
     initialGoto?: string
     activitySource: ActivitySourceData
     disableDispatchDelays?: boolean
@@ -202,6 +210,7 @@ export class Manager extends EventEmitter implements RunningStates {
 
     startedAt?: DayjsObj;
     validConfigLoaded: boolean = false;
+    lastParseConfigHash?: string;
 
     eventsState: RunningState = {
         state: STOPPED,
@@ -265,8 +274,8 @@ export class Manager extends EventEmitter implements RunningStates {
             data.historical = this.resources.getHistoricalDisplayStats();
             data.cache = resStats.cache;
             data.cache.currentKeyCount = await this.resources.getCacheKeyCount();
-            data.cache.isShared = this.resources.cacheSettingsHash === 'default';
-            data.cache.provider = this.resources.cacheType;
+            data.cache.isShared = this.resources.cache.isDefaultCache;
+            data.cache.provider = this.resources.cache.providerOptions.store;
         }
         return data;
     }
@@ -373,7 +382,7 @@ export class Manager extends EventEmitter implements RunningStates {
 
         this.eventsSampleInterval = setInterval((function(self) {
             return function() {
-                const et = self.resources !== undefined ? self.resources.stats.historical.eventsCheckedTotal : 0;
+                const et = self.resources !== undefined ? self.resources.subredditStats.stats.historical.eventsCheckedTotal : 0;
                 const rollingSample = self.eventsSample.slice(0, 7)
                 rollingSample.unshift(et)
                 self.eventsSample = rollingSample;
@@ -395,7 +404,7 @@ export class Manager extends EventEmitter implements RunningStates {
         this.rulesUniqueSampleInterval = setInterval((function(self) {
             return function() {
                 const rollingSample = self.rulesUniqueSample.slice(0, 7)
-                const rt = self.resources !== undefined ? self.resources.stats.historical.rulesRunTotal - self.resources.stats.historical.rulesCachedTotal : 0;
+                const rt = self.resources !== undefined ? self.resources.subredditStats.stats.historical.rulesRunTotal - self.resources.subredditStats.stats.historical.rulesCachedTotal : 0;
                 rollingSample.unshift(rt);
                 self.rulesUniqueSample = rollingSample;
                 const diff = self.rulesUniqueSample.reduceRight((acc: number[], curr, index) => {
@@ -593,6 +602,34 @@ export class Manager extends EventEmitter implements RunningStates {
         return this.runs.map(x => x.commentChecks);
     }
 
+    async setResourceManager(config: Partial<SubredditResourceConfig> = {}) {
+        const {
+            footer,
+            logger = this.logger,
+            subreddit = this.subreddit,
+            caching,
+            credentials,
+            client = this.client,
+            botEntity = this.botEntity,
+            managerEntity = this.managerEntity,
+            statFrequency = this.statDefaults.minFrequency,
+            retention = this.retentionOverride,
+        } = config;
+
+        this.resources = await this.cacheManager.set(this.subreddit.display_name, {
+            footer: footer === undefined && this.resources !== undefined ? this.resources.footer : footer,
+            logger,
+            subreddit,
+            caching,
+            credentials,
+            client,
+            botEntity,
+            managerEntity,
+            statFrequency,
+            retention,
+        });
+    }
+
     protected async parseConfigurationFromObject(configObj: object, suppressChangeEvent: boolean = false) {
         try {
             const configBuilder = new ConfigBuilder({logger: this.logger});
@@ -617,10 +654,6 @@ export class Manager extends EventEmitter implements RunningStates {
             this.dryRun = this.globalDryRun || dryRun;
 
             this.displayLabel = nickname || `${this.subreddit.display_name_prefixed}`;
-
-            if (footer !== undefined) {
-                this.resources.footer = footer;
-            }
 
             this.subMaxWorkers = maxWorkers;
             const realMax = this.getMaxWorkers(this.subMaxWorkers);
@@ -658,13 +691,19 @@ export class Manager extends EventEmitter implements RunningStates {
                 statFrequency: realStatFrequency,
                 retention: this.retentionOverride ?? retention
             };
-            this.resources = await this.cacheManager.set(this.subreddit.display_name, resourceConfig);
+            await this.setResourceManager(resourceConfig);
             this.resources.setLogger(this.logger);
+
+            if (footer !== undefined && this.resources !== undefined) {
+                this.resources.footer = footer;
+            }
 
             this.logger.info('Subreddit-specific options updated');
             this.logger.info('Building Runs and Checks...');
 
-            const structuredRuns = await configBuilder.parseToStructured(validJson, this.resources, this.filterCriteriaDefaults, this.postCheckBehaviorDefaults);
+            const hydratedConfig = await configBuilder.hydrateConfig(validJson, this.resources);
+            this.lastParseConfigHash = objectHash.sha1(hydratedConfig);
+            const structuredRuns = await configBuilder.parseToStructured(hydratedConfig, this.filterCriteriaDefaults, this.postCheckBehaviorDefaults);
 
             let runs: Run[] = [];
 
@@ -769,87 +808,55 @@ export class Manager extends EventEmitter implements RunningStates {
 
     async parseConfiguration(causedBy: Invokee = 'system', force: boolean = false, options?: ManagerStateChangeOption) {
         const {reason, suppressNotification = false, suppressChangeEvent = false} = options || {};
+        if(this.resources === undefined) {
+            await this.setResourceManager();
+        }
         //this.wikiUpdateRunning = true;
         this.lastWikiCheck = dayjs();
+        let wikiPageChanged = false;
 
         try {
             let sourceData: string;
             let wiki: WikiPage;
             try {
                 try {
-                    // @ts-ignore
-                    wiki = await this.subreddit.getWikiPage(this.wikiLocation).fetch();
+                    const {val, wikiPage} = await this.resources.getWikiPage({wiki: this.wikiLocation}, {force: true});
+                    wiki = wikiPage as WikiPage;
+                    //sourceData = val as string;
                 } catch (err: any) {
-                    if(isStatusError(err) && err.statusCode === 404) {
-                        // see if we can create the page
-                        if (!this.client.scope.includes('wikiedit')) {
-                            throw new ErrorWithCause(`Page does not exist and could not be created because Bot does not have oauth permission 'wikiedit'`, {cause: err});
+                    if(err.cause !== undefined && isStatusError(err.cause) && err.cause.statusCode === 404) {
+                        // try to create it
+                        try {
+                            wiki = await this.writeConfig('', 'Empty configuration created for ContextMod');
+                        } catch (e: any) {
+                            throw new CMError(`Parsing config from wiki page failed because ${err.message} AND creating empty page failed`, {cause: e});
                         }
-                        const modPermissions = await this.getModPermissions();
-                        if (!modPermissions.includes('all') && !modPermissions.includes('wiki')) {
-                            throw new ErrorWithCause(`Page does not exist and could not be created because Bot not have mod permissions for creating wiki pages. Must have 'all' or 'wiki'`, {cause: err});
-                        }
-                        if(!this.client.scope.includes('modwiki')) {
-                            throw new ErrorWithCause(`Bot COULD create wiki config page but WILL NOT because it does not have the oauth permissions 'modwiki' which is required to set page visibility and editing permissions. Safety first!`, {cause: err});
-                        }
-                        // @ts-ignore
-                        wiki = await this.subreddit.getWikiPage(this.wikiLocation).edit({
-                            text: '',
-                            reason: 'Empty configuration created for ContextMod'
-                        });
-                        this.logger.info(`Wiki page at ${this.wikiLocation} did not exist so bot created it!`);
-
-                        // 0 = use subreddit wiki permissions
-                        // 1 = only approved wiki contributors
-                        // 2 = only mods may edit and view
-                        // @ts-ignore
-                        await this.subreddit.getWikiPage(this.wikiLocation).editSettings({
-                            permissionLevel: 2,
-                            // don't list this page on r/[subreddit]/wiki/pages
-                            listed: false,
-                        });
-                        this.logger.info('Bot set wiki page visibility to MODS ONLY');
                     } else {
-                        throw err;
+                        throw new CMError('Reading config from wiki failed', {cause: err});
                     }
                 }
                 const revisionDate = dayjs.unix(wiki.revision_date);
-                if (!force && this.validConfigLoaded && (this.lastWikiRevision !== undefined && this.lastWikiRevision.isSame(revisionDate))) {
-                    // nothing to do, we already have this revision
-                    //this.wikiUpdateRunning = false;
-                    if (force) {
-                        this.logger.info('Config is up to date');
+
+                if(this.lastWikiRevision !== undefined) {
+                    if(this.lastWikiRevision.isSame(revisionDate)) {
+                        this.logger.verbose('Config wiki has not changed since last check, going ahead with other checks...');
+                    } else {
+                        wikiPageChanged = true;
+                        this.logger.info(`Updating config due to stale wiki page (${dayjs.duration(dayjs().diff(revisionDate)).humanize()} old)`)
                     }
-                    return false;
-                }
-
-                if (force) {
-                    this.logger.info('Config update was forced');
-                } else if (!this.validConfigLoaded) {
+                } else {
                     this.logger.info('Trying to load (new?) config now since there is no valid config loaded');
-                } else if (this.lastWikiRevision !== undefined) {
-                    this.logger.info(`Updating config due to stale wiki page (${dayjs.duration(dayjs().diff(revisionDate)).humanize()} old)`)
-                }
-
-                if(this.queueState.state === RUNNING) {
-                    this.logger.verbose('Waiting for activity processing queue to pause before continuing config update');
-                    await this.pauseQueue(causedBy);
                 }
 
                 this.lastWikiRevision = revisionDate;
                 sourceData = await wiki.content_md;
             } catch (err: any) {
-                let hint = '';
-                if(isStatusError(err) && err.statusCode === 403) {
-                    hint = ` -- HINT: Either the page is restricted to mods only and the bot's reddit account does have the mod permission 'all' or 'wiki' OR the bot does not have the 'wikiread' oauth permission`;
-                }
-                const msg = `Could not read wiki configuration. Please ensure the page https://reddit.com${this.subreddit.url}wiki/${this.wikiLocation} exists and is readable${hint}`;
-                throw new ErrorWithCause(msg, {cause: err});
+                throw err;
             }
 
             if (sourceData.replace('\r\n', '').trim() === '') {
-                this.logger.error(`Wiki page contents was empty`);
-                throw new ConfigParseError('Wiki page contents was empty');
+                this.logger.error(`Wiki page contents is empty. The bot cannot run until this subreddit's wiki page has a valid config added!`);
+                throw new ConfigParseError(`Wiki page contents is empty. The bot cannot run until this subreddit's wiki page has a valid config added!`);
             }
 
             const [format, configObj, jsonErr, yamlErr] = parseFromJsonOrYamlToObject(sourceData);
@@ -869,6 +876,23 @@ export class Manager extends EventEmitter implements RunningStates {
                 throw new ConfigParseError('Could not parse wiki page contents as JSON or YAML')
             }
 
+            if (!wikiPageChanged && this.validConfigLoaded && this.lastParseConfigHash !== undefined && !force) {
+                // need to check if hydrated is different from current
+                const hydratedRuns = await this.buildHydratedRuns(configObj.toJS());
+                const hydratedHash = objectHash.sha1(hydratedRuns);
+                if (hydratedHash === this.lastParseConfigHash) {
+                    this.logger.info('Config is up to date');
+                    return false;
+                } else {
+                    this.logger.info('Hydrated config differed from wiki contents, continuing with update.');
+                }
+            }
+
+            if(this.queueState.state === RUNNING) {
+                this.logger.verbose('Waiting for activity processing queue to pause before continuing config update');
+                await this.pauseQueue(causedBy);
+            }
+
             await this.parseConfigurationFromObject(configObj.toJS(), suppressChangeEvent);
             this.logger.info('Checks updated');
 
@@ -878,13 +902,20 @@ export class Manager extends EventEmitter implements RunningStates {
 
             return true;
         } catch (err: any) {
-            const error = new ErrorWithCause('Failed to parse subreddit configuration', {cause: err});
-            // @ts-ignore
-           //error.logged = true;
-            this.logger.error(error);
+            if(this.resources === undefined) {
+                // if we fail to get a valid config and there is no existing resource then just create a default one
+                // -- also ensures that if one already exists we don't overwrite it
+                await this.setResourceManager()
+            }
             this.validConfigLoaded = false;
-            throw error;
+            throw new ErrorWithCause('Failed to parse subreddit configuration', {cause: err});
         }
+    }
+
+    async buildHydratedRuns(configObj: object) {
+        const configBuilder = new ConfigBuilder({logger: this.logger});
+        const validJson = configBuilder.validateJson(configObj);
+        return await configBuilder.hydrateConfig(validJson, this.resources);
     }
 
     async handleActivity(activity: (Submission | Comment), options: runCheckOptions): Promise<void> {
@@ -964,7 +995,7 @@ export class Manager extends EventEmitter implements RunningStates {
         const itemId = await item.id;
 
         if(await this.resources.hasRecentSelf(item)) {
-            let recentMsg = `Found in Activities recently (last ${this.resources.selfTTL} seconds) modified/created by this bot`;
+            let recentMsg = `Found in Activities recently (last ${this.resources.ttl.selfTTL} seconds) modified/created by this bot`;
             if(force) {
                 this.logger.debug(`${recentMsg} but will run anyway because "force" option was true.`);
             } else {
@@ -1493,6 +1524,11 @@ export class Manager extends EventEmitter implements RunningStates {
 
     async startQueue(causedBy: Invokee = 'system', options?: ManagerStateChangeOption) {
 
+        if(!this.validConfigLoaded) {
+            this.logger.warn('Cannot start queue while manager has an invalid configuration');
+            return;
+        }
+
         if(this.activityRepo === undefined) {
             this.activityRepo = this.resources.database.getRepository(Activity);
         }
@@ -1789,6 +1825,86 @@ export class Manager extends EventEmitter implements RunningStates {
             for (const client of this.influxClients) {
                 await client.writePoint(metric);
             }
+        }
+    }
+
+    async setWikiPermissions(location: string = this.wikiLocation) {
+        if(!this.client.scope.includes('modwiki')) {
+            throw new SimpleError(`Cannot check or set permissions for wiki because bot does not have the 'modwiki' oauth permission`);
+        }
+
+        const settings = await this.subreddit.getWikiPage(location).getSettings();
+        const reasons = [];
+        if(settings.listed) {
+            reasons.push(`Page is listed (visible from r/${this.subreddit.display_name}/wiki/pages) but should be delisted.`)
+        }
+        // 0 = use subreddit wiki permissions
+        // 1 = only approved wiki contributors
+        // 2 = only mods may edit and view
+        if(settings.permissionLevel === 0) {
+            reasons.push(`Page editing level is set to 'inherit from general wiki settings' but should be set to contributors/mods only`);
+        }
+        if (reasons.length > 0) {
+            this.logger.debug(`Updating wiki page permissions because: ${reasons.join(' | ')}`)
+            // @ts-ignore
+            await this.subreddit.getWikiPage(location).editSettings({
+                permissionLevel: 2,
+                // don't list this page on r/[subreddit]/wiki/pages
+                listed: false,
+            });
+            this.logger.info('Bot set wiki page visibility to MODS ONLY and delisted the page');
+        }
+    }
+
+    async writeConfig(data: string, reason?: string, location: string = this.wikiLocation) {
+
+        const oauthErrors = [];
+        if (!this.client.scope.includes('wikiedit')) {
+            oauthErrors.push(`missing oauth permission 'wikiedit' is required to edit wiki pages`);
+        }
+        if (!this.client.scope.includes('modwiki')) {
+            oauthErrors.push(`missing oauth permission 'modwiki' which is required to set page visibility and editing permissions.`);
+        }
+
+        if(oauthErrors.length > 0) {
+            throw new SimpleError(`Cannot edit wiki page ${generateFullWikiUrl(this.subreddit, location)} because: ${oauthErrors.join(' | ')}`);
+        }
+
+        try {
+            // @ts-ignore
+            const wiki = await this.subreddit.getWikiPage(location).edit({
+                text: data,
+                reason: reason,
+            });
+            this.logger.debug(`Wrote config to ${location}`);
+            try {
+                await this.setWikiPermissions(location);
+            } catch (e: any) {
+                if (e.message.includes('modwiki')) {
+                    this.logger.warn(e);
+                } else {
+                    throw new CMError(`Successfully edited wiki page ${generateFullWikiUrl(this.subreddit, location)} but an error occurred while checking/setting page permissions`, {cause: e});
+                }
+            }
+            return wiki;
+        } catch (err: any) {
+            if (isStatusError(err)) {
+                const modPermissions = await this.getModPermissions();
+                if (!modPermissions.includes('all') && !modPermissions.includes('wiki')) {
+                    throw new ErrorWithCause(`Could not create wiki page ${generateFullWikiUrl(this.subreddit, location)} because Bot not have mod permissions for creating wiki pages. Must have 'all' or 'wiki'`, {cause: err});
+                }
+            } else {
+                throw err;
+            }
+        }
+    }
+
+    toNormalizedManager(): NormalizedManagerResponse {
+        return {
+            name: this.displayLabel,
+            subreddit: this.subreddit.display_name,
+            subredditNormal: parseRedditEntity(this.subreddit.display_name).name,
+            guests: this.managerEntity.getGuests().map(x => guestEntityToApiGuest(x))
         }
     }
 }

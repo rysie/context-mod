@@ -1,3 +1,5 @@
+import {ActivityType} from "./Reddit";
+
 /**
  * A duration and how to compare it against a value
  *
@@ -16,6 +18,22 @@
 export type DurationComparor = string;
 
 /**
+ * A relative datetime description
+ *
+ * May be either:
+ *
+ * * day of the week (monday, tuesday, etc...)
+ * * cron expression IE `* * 15 *`
+ *
+ * See https://crontab.guru/ for generating expressions
+ *
+ * https://regexr.com/6u3cc
+ *
+ * @pattern ((?:(?:(?:(?:\d+,)+\d+|(?:\d+(?:\/|-|#)\d+)|\d+L?|\*(?:\/\d+)?|L(?:-\d+)?|\?|[A-Z]{3}(?:-[A-Z]{3})?) ?){5,7})$)|(mon|tues|wed|thurs|fri|sat|sun){1}
+ * */
+export type RelativeDateTimeMatch = string;
+
+/**
  * A string containing a comparison operator and a value to compare against
  *
  * The syntax is `(< OR > OR <= OR >=) <number>[percent sign]`
@@ -23,7 +41,7 @@ export type DurationComparor = string;
  * * EX `> 100`  => greater than 100
  * * EX `<= 75%` => less than or equal to 75%
  *
- * @pattern ^\s*(>|>=|<|<=)\s*(\d+)\s*(%?)(.*)$
+ * @pattern ^\s*(>|>=|<|<=)\s*((?:\d+)(?:(?:(?:.|,)\d+)+)?)\s*(%?)(.*)$
  * */
 export type CompareValueOrPercent = string;
 export type StringOperator = '>' | '>=' | '<' | '<=';
@@ -148,10 +166,18 @@ export type RecordOutputOption = boolean | RecordOutputType | RecordOutputType[]
 export type PostBehaviorType = 'next' | 'stop' | 'nextRun' | string;
 export type onExistingFoundBehavior = 'replace' | 'skip' | 'ignore';
 export type ActionTarget = 'self' | 'parent';
+export type ArbitraryActionTarget = ActionTarget | string;
 export type InclusiveActionTarget = ActionTarget | 'any';
-export type DispatchSource = 'dispatch' | `dispatch:${string}`;
-export type NonDispatchActivitySource = 'poll' | `poll:${PollOn}` | 'user' | `user:${string}`;
-export type ActivitySourceTypes = 'poll' | 'dispatch' | 'user'; // TODO
+export const SOURCE_POLL = 'poll';
+export type SourcePollStr = 'poll';
+export const SOURCE_DISPATCH = 'dispatch';
+export type SourceDispatchStr = 'dispatch';
+export const SOURCE_USER = 'user';
+export type SourceUserStr = 'user';
+
+export type DispatchSourceValue = SourceDispatchStr | `dispatch:${string}`;
+export type NonDispatchActivitySourceValue = SourcePollStr | `poll:${PollOn}` | SourceUserStr | `user:${string}`;
+export type ActivitySourceTypes = SourcePollStr | SourceDispatchStr | SourceUserStr; // TODO
 // https://github.com/YousefED/typescript-json-schema/issues/426
 // https://github.com/YousefED/typescript-json-schema/issues/425
 // @pattern ^(((poll|dispatch)(:\w+)?)|user)$
@@ -169,11 +195,17 @@ export type ActivitySourceTypes = 'poll' | 'dispatch' | 'user'; // TODO
  *
  *
  * */
-export type ActivitySource = NonDispatchActivitySource | DispatchSource;
+export type ActivitySourceValue = NonDispatchActivitySourceValue | DispatchSourceValue;
+
+export interface ActivitySourceData {
+    type: ActivitySourceTypes
+    identifier?: string
+}
 
 export type ConfigFormat = 'json' | 'yaml';
 export type ActionTypes =
     'comment'
+    | 'submission'
     | 'lock'
     | 'remove'
     | 'report'
@@ -262,7 +294,7 @@ export type UserNoteType =
 
 export const userNoteTypes = ['gooduser', 'spamwatch', 'spamwarn', 'abusewarn', 'ban', 'permban', 'botban'];
 
-export type ConfigFragmentValidationFunc = (data: object, fetched: boolean) => boolean;
+export type ConfigFragmentParseFunc = (data: object, fetched: boolean, subreddit?: string) => object | object[];
 
 export interface WikiContext {
     wiki: string
@@ -276,4 +308,90 @@ export interface ExternalUrlContext {
 export interface UrlContext {
     value: string
     context: WikiContext | ExternalUrlContext
+}
+
+export interface ImageHashCacheData {
+    original?: string
+    flipped?: string
+}
+
+// https://www.reddit.com/message/compose?to=/r/mealtimevideos&message=https://www.reddit.com/r/ContextModBot/comments/otz396/introduction_to_contextmodbot
+
+export interface BaseTemplateData {
+    botLink: string
+    modmailLink?: string
+    manager?: string
+    check?: string
+    //[key: string]: any
+}
+
+export interface ActivityTemplateData {
+    kind: ActivityType
+    author: string
+    votes: number
+    age: string
+    permalink: string
+    id: string
+    subreddit: string
+    title: string
+    shortTitle: string
+}
+
+export interface ModdedActivityTemplateData {
+    reports: number
+    modReports: number
+    userReports: number
+}
+
+export interface SubmissionTemplateData extends ActivityTemplateData, Partial<ModdedActivityTemplateData> {
+    nsfw: boolean
+    spoiler: boolean
+    op: boolean
+    upvoteRatio: string
+    url: string
+}
+
+export interface CommentTemplateData extends ActivityTemplateData, Partial<ModdedActivityTemplateData> {
+    op: boolean
+}
+
+export interface SubredditTemplateData {
+    subredditBreakdownFormatted: string
+    subredditBreakdown?: {
+        totalFormatted: string
+        submissionFormatted: string
+        commentFormatted: string
+    }
+}
+
+export interface RuleResultTemplateData {
+    kind: string
+    triggered: boolean
+    result: string
+    [key: string]: any
+}
+
+export interface ActionResultTemplateData {
+    kind: string
+    success: boolean
+    result: string
+    [key: string]: any
+}
+
+export interface ActionResultsTemplateData {
+    actionSummary: string
+    actions: {
+        [key: string]: ActionResultTemplateData
+    }
+}
+
+export interface RuleResultsTemplateData {
+    ruleSummary: string
+    rules: {
+        [key: string]: RuleResultTemplateData
+    }
+}
+
+export interface GenericContentTemplateData extends BaseTemplateData, Partial<RuleResultsTemplateData>, Partial<ActionResultsTemplateData> {
+    item?: (SubmissionTemplateData | CommentTemplateData)
 }

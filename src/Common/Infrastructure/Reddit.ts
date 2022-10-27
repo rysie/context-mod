@@ -1,6 +1,8 @@
-import {Comment, Submission} from "snoowrap/dist/objects";
+import {Comment, RedditUser, Submission, Subreddit} from "snoowrap/dist/objects";
+import { ValueOf } from "ts-essentials";
 
 export type ActivityType = 'submission' | 'comment';
+export type MaybeActivityType = ActivityType | false;
 export type FullNameTypes = ActivityType | 'user' | 'subreddit' | 'message';
 
 export interface RedditThing {
@@ -20,8 +22,22 @@ export type AuthorHistorySortTime = 'hour' | 'day' | 'week' | 'month' | 'year' |
 export type AuthorHistoryType = 'comment' | 'submission' | 'overview';
 export type SnoowrapActivity = Submission | Comment;
 
+type valueof<T> = T[keyof T]
+
+/*
+* Depending on what caching provider is used the results from cache can either be
+*
+* * full-fat SnoowrapActivities (memory provider keeps everything in memory!)
+* * OR json-serialized objects of the data from those activities (all other cache providers)
+*
+* we don't know which they are until we retrieve them.
+* */
+export type SnoowrapLike = Record<keyof SnoowrapActivity, valueof<SnoowrapActivity>>;
+export type RedditUserLike = Record<keyof RedditUser, valueof<RedditUser>>;
+export type SubredditLike = Record<keyof Subreddit, valueof<Subreddit>>;
+
 export interface CachedFetchedActivitiesResult {
-    pre: SnoowrapActivity[]
+    pre: SnoowrapActivity[] | SnoowrapLike[]
     rawCount: number
     apiCount: number
     preMaxTrigger?: string | null
@@ -29,6 +45,7 @@ export interface CachedFetchedActivitiesResult {
 
 export interface FetchedActivitiesResult extends CachedFetchedActivitiesResult {
     post: SnoowrapActivity[]
+    pre: SnoowrapActivity[]
 }
 
 export type ReportType = 'mod' | 'user';
@@ -74,4 +91,32 @@ export const activityReports = (activity: SnoowrapActivity): Report[] => {
         })
     }
     return reports;
+}
+
+export interface RawSubredditRemovalReasonData {
+    data: {
+        [key: string]: SubredditRemovalReason
+    },
+    order: [string]
+}
+
+export interface SubredditRemovalReason {
+    message: string
+    id: string,
+    title: string
+}
+
+export interface SubredditActivityAbsoluteBreakdown {
+    count: number
+    name: string
+}
+
+export interface SubredditActivityBreakdown extends SubredditActivityAbsoluteBreakdown {
+    percent: number
+}
+
+export interface SubredditActivityBreakdownByType {
+    total: SubredditActivityBreakdown[]
+    submission: SubredditActivityBreakdown[]
+    comment: SubredditActivityBreakdown[]
 }
