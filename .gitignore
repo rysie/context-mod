@@ -387,6 +387,7 @@ dist
 **/src/**/*.map
 /**/*.sqlite
 /**/*.bak
+config.json
 *.yaml
 *.json5
 
