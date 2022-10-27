@@ -19,6 +19,7 @@ services:
     build:
       context: .
       dockerfile: dev.Dockerfile
+    image: ${DOCKER_REGISTRY_IMAGE}
     volumes:
       - ./:/config
     ports:

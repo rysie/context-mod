@@ -6,4 +6,4 @@ then
 fi
 
 docker-compose -f docker-compose.yml --env-file .env build
-docker push ${DOCKER_REGISTRY_STAGE}
+docker push ${DOCKER_REGISTRY_IMAGE}
